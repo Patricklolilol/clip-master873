@@ -89,21 +89,18 @@ const Index = () => {
 
   // Clean up any stuck processing states when showing input view
   useEffect(() => {
-    if (!shouldShowDashboard && forceInputView) {
-      // If we're forcing input view, make sure we're not showing as processing
-      if (isProcessing && currentJobId) {
-        // Check if the current job is actually stuck (older than 10 minutes)
-        const currentJob = jobs.find(job => job.id === currentJobId);
-        if (currentJob) {
-          const jobAge = Date.now() - new Date(currentJob.created_at).getTime();
-          if (jobAge > 10 * 60 * 1000) { // 10 minutes
-            console.warn('Detected stuck job, resetting state');
-            resetJobState();
-          }
+    if (forceInputView && isProcessing && currentJobId) {
+      // Check if the current job is actually stuck (older than 10 minutes)
+      const currentJob = jobs.find(job => job.id === currentJobId);
+      if (currentJob) {
+        const jobAge = Date.now() - new Date(currentJob.created_at).getTime();
+        if (jobAge > 10 * 60 * 1000) { // 10 minutes
+          console.warn('Detected stuck job, resetting state');
+          resetJobState();
         }
       }
     }
-  }, [shouldShowDashboard, forceInputView, isProcessing, currentJobId, jobs, resetJobState]);
+  }, [forceInputView, isProcessing, currentJobId, jobs, resetJobState]);
 
   if (shouldShowDashboard) {
     return (

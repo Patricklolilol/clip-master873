@@ -454,7 +454,7 @@ const Index = () => {
 
       {/* Processing Modal */}
       <Dialog open={isProcessing} onOpenChange={(open) => {
-        // Allow closing modal by canceling the job
+        // Allow closing modal by escape key or clicking outside
         if (!open && currentJobId) {
           handleCancelJob();
         }
@@ -477,13 +477,12 @@ const Index = () => {
             <div className="text-sm text-muted-foreground">
               Processing stages: Download → Transcribe → Detect Highlights → Create Clips → Upload
             </div>
-            {/* Cancel button */}
+            {/* Cancel button - always enabled */}
             <div className="pt-4 border-t">
               <Button 
                 variant="outline" 
                 onClick={handleCancelJob}
                 className="w-full"
-                disabled={!currentJobId}
               >
                 Cancel & Start New Video
               </Button>

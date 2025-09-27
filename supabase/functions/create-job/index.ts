@@ -91,19 +91,21 @@ serve(async (req) => {
       throw new Error('Failed to create job');
     }
 
-    // Trigger the video processing pipeline
-    const processResponse = await fetch(`${supabaseUrl}/functions/v1/process-video`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${supabaseServiceKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ job_id: job.id })
-    });
+    // Trigger the video processing pipeline using direct function invocation
+    try {
+      const processResponse = await supabase.functions.invoke('process-video', {
+        body: { job_id: job.id }
+      });
 
-    if (!processResponse.ok) {
-      console.error('Failed to trigger video processing:', await processResponse.text());
-      // Don't throw error here - job is created, processing will be retried
+      if (processResponse.error) {
+        console.error('Failed to trigger video processing:', processResponse.error);
+        // Don't throw error here - job is created, processing will be retried
+      } else {
+        console.log('Video processing triggered successfully for job:', job.id);
+      }
+    } catch (processError) {
+      console.error('Error invoking process-video:', processError);
+      // Continue - job is created, user can retry
     }
 
     return new Response(JSON.stringify({

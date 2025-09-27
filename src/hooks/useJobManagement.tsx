@@ -179,28 +179,37 @@ export const useJobManagement = () => {
     };
   }, [user]);
 
-  // Cancel current job
+  // Enhanced cancel job with better error handling
   const cancelJob = async (jobId?: string) => {
     const jobToCancel = jobId || currentJobId;
-    if (!jobToCancel) return false;
+    if (!jobToCancel) {
+      console.warn('No job ID provided for cancellation');
+      return false;
+    }
 
     try {
-      // Mark as canceled in database
+      console.log(`Canceling job: ${jobToCancel}`);
+      
+      // Mark as canceled in database with specific error message
       const { error } = await supabase
         .from('jobs')
         .update({ 
           status: 'failed',
           error_message: 'Canceled by user',
+          current_stage: 'Canceled',
+          progress_percent: 0,
           updated_at: new Date().toISOString()
         })
         .eq('id', jobToCancel);
 
       if (error) {
         console.error('Error canceling job:', error);
-        return false;
+        throw error;
       }
 
-      // Update local state
+      console.log(`Job ${jobToCancel} canceled successfully`);
+      
+      // Update local state immediately
       setIsCanceled(true);
       setCurrentJobId(null);
       setIsLoading(false);
@@ -212,18 +221,25 @@ export const useJobManagement = () => {
         variant: "default",
       });
 
-      // Refresh jobs list
+      // Refresh jobs list to reflect the change
       await fetchJobs();
       
       return true;
     } catch (error) {
       console.error('Error canceling job:', error);
+      
+      // Even if database update fails, reset local state
+      setIsCanceled(true);
+      setCurrentJobId(null);
+      setIsLoading(false);
+      
       toast({
-        title: "Failed to cancel job",
-        description: "There was an error canceling the job.",
-        variant: "destructive",
+        title: "Job canceled locally",
+        description: "The job was stopped in the interface. You can start a new video now.",
+        variant: "default",
       });
-      return false;
+      
+      return true; // Return true to allow UI to proceed
     }
   };
 

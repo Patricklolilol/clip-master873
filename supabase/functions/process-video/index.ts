@@ -38,23 +38,85 @@ serve(async (req) => {
       throw new Error('Job ID is required');
     }
 
+    // Start background video processing immediately using Deno's queueMicrotask
+    console.log(`Starting background processing for job ${job_id}`);
+    
+    // Use queueMicrotask for background processing without blocking response
+    queueMicrotask(() => {
+      processVideoInBackground(job_id, supabaseUrl, supabaseServiceKey, openaiApiKey, youtubeApiKey)
+        .catch(error => {
+          console.error(`Background processing failed for job ${job_id}:`, error);
+        });
+    });
+    
+    console.log(`Background processing queued for job ${job_id}`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      job_id,
+      message: 'Video processing started in background'
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('Error starting video processing:', error);
+    
+    // Try to update job status to failed
+    try {
+      const { job_id } = await req.json();
+      if (job_id) {
+        const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        await updateJobStatus(supabase, job_id, 'failed', 0, `Failed to start processing: ${errorMessage}`);
+      }
+    } catch {}
+
+    const errorMessage = error instanceof Error ? error.message : 'Failed to start video processing';
+    return new Response(JSON.stringify({
+      error: errorMessage
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Background processing function
+async function processVideoInBackground(
+  jobId: string, 
+  supabaseUrl: string, 
+  supabaseServiceKey: string, 
+  openaiApiKey: string, 
+  youtubeApiKey: string
+) {
+  const supabase = createClient(supabaseUrl, supabaseServiceKey);
+  
+  try {
+    console.log(`Background processing started for job ${jobId}`);
+    
     // Get job details
     const { data: job, error: jobError } = await supabase
       .from('jobs')
       .select('*')
-      .eq('id', job_id)
+      .eq('id', jobId)
       .single();
 
     if (jobError || !job) {
       throw new Error('Job not found');
     }
 
-    console.log(`Processing job ${job_id} for video ${job.video_id}`);
+    // Check if job was canceled
+    if (job.status === 'failed' && job.error_message?.includes('Canceled by user')) {
+      console.log(`Job ${jobId} was canceled, stopping processing`);
+      return;
+    }
 
-    // Update job status to downloading
-    await updateJobStatus(supabase, job_id, 'downloading', 10, 'Downloading video from YouTube');
+    console.log(`Processing job ${jobId} for video ${job.video_id}`);
 
     // Step 1: Download video metadata and basic info
+    await updateJobStatus(supabase, jobId, 'downloading', 10, 'Downloading video from YouTube');
+    
     const videoMetadata = await downloadVideoMetadata(job.video_id, youtubeApiKey);
     
     // Update job with video metadata
@@ -64,36 +126,37 @@ serve(async (req) => {
         title: videoMetadata.title,
         download_url: videoMetadata.download_url 
       })
-      .eq('id', job_id);
+      .eq('id', jobId);
 
     // Step 2: AI-powered transcript generation
-    await updateJobStatus(supabase, job_id, 'transcribing', 25, 'Generating AI-powered transcript');
+    await updateJobStatus(supabase, jobId, 'transcribing', 25, 'Generating AI-powered transcript');
     
     const transcriptData = await generateTranscriptWithAI(videoMetadata, openaiApiKey);
     
     await supabase
       .from('jobs')
       .update({ transcript_data: transcriptData })
-      .eq('id', job_id);
+      .eq('id', jobId);
 
     // Step 3: AI-powered highlight detection
-    await updateJobStatus(supabase, job_id, 'detecting_highlights', 50, 'AI analyzing content for viral moments');
+    await updateJobStatus(supabase, jobId, 'detecting_highlights', 50, 'AI analyzing content for viral moments');
     
     const highlights = await detectHighlightsWithAI(transcriptData, job, videoMetadata, openaiApiKey);
 
     await supabase
       .from('jobs')
       .update({ segments_data: highlights })
-      .eq('id', job_id);
+      .eq('id', jobId);
 
     // Step 4: Create clips in database  
-    await updateJobStatus(supabase, job_id, 'creating_clips', 75, 'Generating video clips');
+    await updateJobStatus(supabase, jobId, 'creating_clips', 75, 'Generating video clips');
     
     const clips = await createClips(supabase, job, highlights);
 
     // Step 5: Process actual video files with FFmpeg service
-    await updateJobStatus(supabase, job_id, 'uploading', 85, 'Processing video files with FFmpeg');
+    await updateJobStatus(supabase, jobId, 'uploading', 85, 'Processing video files with FFmpeg');
     
+    let processedClips = 0;
     for (const clip of clips) {
       try {
         console.log(`Processing video for clip ${clip.id}`);
@@ -117,11 +180,12 @@ serve(async (req) => {
           })
           .eq('id', clip.id);
           
-        console.log(`Clip ${clip.id} processed successfully`);
+        processedClips++;
+        console.log(`Clip ${clip.id} processed successfully (${processedClips}/${clips.length})`);
       } catch (clipError) {
         console.error(`Failed to process clip ${clip.id}:`, clipError);
         
-        // Mark clip as failed
+        // Mark clip as failed but continue with other clips
         await supabase
           .from('clips')
           .update({
@@ -136,48 +200,37 @@ serve(async (req) => {
     }
 
     // Step 6: Complete processing
-    await updateJobStatus(supabase, job_id, 'completed', 100, 'Processing complete');
+    await updateJobStatus(supabase, jobId, 'completed', 100, 'Processing complete');
 
     await supabase
       .from('jobs')
       .update({ 
         completed_at: new Date().toISOString()
       })
-      .eq('id', job_id);
+      .eq('id', jobId);
 
-    console.log(`Job ${job_id} completed successfully. Generated ${clips.length} clips.`);
-
-    return new Response(JSON.stringify({
-      success: true,
-      job_id,
-      clips_generated: clips.length,
-      message: 'Video processing completed successfully'
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    console.log(`Job ${jobId} completed successfully. Generated ${clips.length} clips, ${processedClips} processed successfully.`);
 
   } catch (error) {
-    console.error('Error in process-video:', error);
+    console.error(`Background processing failed for job ${jobId}:`, error);
     
-    // Try to update job status to failed
+    // Mark job as failed
     try {
-      const { job_id } = await req.json();
-      if (job_id) {
-        const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        await updateJobStatus(supabase, job_id, 'failed', 0, `Processing failed: ${errorMessage}`);
-      }
-    } catch {}
-
-    const errorMessage = error instanceof Error ? error.message : 'Video processing failed';
-    return new Response(JSON.stringify({
-      error: errorMessage
-    }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      await updateJobStatus(supabase, jobId, 'failed', 0, `Processing failed: ${errorMessage}`);
+      
+      await supabase
+        .from('jobs')
+        .update({ 
+          error_message: errorMessage,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', jobId);
+    } catch (updateError) {
+      console.error('Failed to update job status to failed:', updateError);
+    }
   }
-});
+}
 
 async function updateJobStatus(supabase: any, jobId: string, status: string, progress: number, stage: string) {
   await supabase
@@ -474,211 +527,227 @@ function getTranscriptSegment(segments: any[], startTime: number, endTime: numbe
 
 function generateCaptionSuggestions(style: string): string[] {
   const suggestions = {
-    educational: ['Bold white text with black outline', 'Yellow highlights for key points'],
-    entertainment: ['Colorful animated text', 'Emoji reactions'],
-    dramatic: ['Large bold text with shadows', 'Red text for emphasis'],
-    general: ['Clean white text', 'Subtle animations']
+    educational: ['💡 Pro Tip', '🎯 Key Point', '📚 Learn This'],
+    entertainment: ['🔥 Epic Moment', '😂 Hilarious', '🤯 Mind Blown'],
+    dramatic: ['🚨 Breaking', '⚡ Shocking Truth', '💥 Plot Twist'],
+    general: ['✨ Amazing', '🎪 Check This Out', '🌟 Incredible']
   };
   return suggestions[style as keyof typeof suggestions] || suggestions.general;
 }
 
 function generateMusicSuggestion(style: string): string {
-  const music = {
-    educational: 'Light upbeat background music',
-    entertainment: 'Fun energetic beat',
-    dramatic: 'Suspenseful build-up music',
-    general: 'Neutral background track'
+  const musicMap = {
+    educational: 'upbeat',
+    entertainment: 'funny',
+    dramatic: 'dramatic',
+    general: 'upbeat'
   };
-  return music[style as keyof typeof music] || music.general;
+  return musicMap[style as keyof typeof musicMap] || 'upbeat';
 }
 
-function generateSFXSuggestion(style: string): string {
-  const sfx = {
-    educational: 'Ding for key points',
-    entertainment: 'Whoosh and pop sounds',
-    dramatic: 'Dramatic sting',
-    general: 'Subtle transition sounds'
+function generateSFXSuggestion(style: string): string[] {
+  const sfxMap = {
+    educational: ['ding', 'pop'],
+    entertainment: ['whoosh', 'pop', 'boom'],
+    dramatic: ['boom', 'zap', 'swoosh'],
+    general: ['whoosh', 'pop']
   };
-  return sfx[style as keyof typeof sfx] || sfx.general;
+  return sfxMap[style as keyof typeof sfxMap] || ['whoosh'];
 }
 
 async function createClips(supabase: any, job: Job, highlights: any[]) {
   const clips = [];
   
-  for (const [index, highlight] of highlights.entries()) {
-    const duration = highlight.end_time - highlight.start_time;
+  for (let i = 0; i < highlights.length; i++) {
+    const highlight = highlights[i];
     
-    // In production, this would trigger actual video processing
-    // For now, we create database records that would be populated by a video processing service
-    const clipId = `${job.id}_${index}`;
-    
-    // Create clip record with AI-enhanced metadata
-    const { data: clip, error } = await supabase
+    const { data: clip, error: clipError } = await supabase
       .from('clips')
       .insert({
         job_id: job.id,
         user_id: job.user_id,
-        title: highlight.title || `Viral Clip ${index + 1}`,
-        duration_seconds: duration,
+        title: highlight.title,
         start_time: highlight.start_time,
         end_time: highlight.end_time,
+        duration_seconds: highlight.end_time - highlight.start_time,
         predicted_engagement: highlight.score,
-        status: 'processing', // Would be updated by video processing service
         segment_scores: {
-          ...highlight,
-          processing_metadata: {
-            caption_suggestions: highlight.caption_suggestions,
-            music_suggestion: highlight.music_suggestion,
-            sfx_suggestion: highlight.sfx_suggestion,
-            style: highlight.style,
-            created_at: new Date().toISOString()
-          }
+          viral_score: highlight.score,
+          reasoning: highlight.reason,
+          transcript: highlight.transcript_segment
         },
-        // These URLs would be populated by the video processing service
-        video_url: null, // Will be set after processing
-        thumbnail_urls: [], // Will be generated during processing
-        subtitle_urls: [], // Will be generated with captions
-        file_size_bytes: Math.floor(duration * 1500000), // Estimate: ~1.5MB per second
-        checksum: null // Will be calculated after processing
+        status: 'processing',
+        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
       })
       .select()
       .single();
     
-    if (!error && clip) {
-      clips.push(clip);
-      
-      // Log clip creation for processing service
-      console.log(`Created clip ${clipId}: ${highlight.title} (${highlight.start_time}s - ${highlight.end_time}s)`);
-      console.log(`AI Analysis: ${highlight.reason}`);
-      console.log(`Predicted engagement: ${(highlight.score * 100).toFixed(1)}%`);
+    if (clipError) {
+      console.error('Error creating clip:', clipError);
     } else {
-      console.error(`Failed to create clip ${index}:`, error);
+      clips.push(clip);
     }
   }
   
   return clips;
 }
 
-async function processClipWithFFmpeg(clip: any, videoMetadata: any, transcript: string) {
+async function processClipWithFFmpeg(clip: any, videoMetadata: any, fullTranscript: string) {
   const processingStartTime = Date.now();
   const ffmpegServiceUrl = Deno.env.get('FFMPEG_SERVICE_URL') || 'https://ffmpeg-service-production-0e87.up.railway.app';
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   
   try {
-    console.log(`Processing clip ${clip.id} with FFmpeg service at ${ffmpegServiceUrl}`);
+    console.log(`Processing clip ${clip.id}: "${clip.title}" (${clip.start_time}s - ${clip.end_time}s)`);
     
-    // Step 1: Download YouTube video using yt-dlp
-    const downloadResponse = await fetch(`${ffmpegServiceUrl}/download`, {
+    // Step 1: Download video from YouTube
+    const downloadResponse = await fetch(`${ffmpegServiceUrl}/api/download`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({
         url: videoMetadata.download_url,
-        format: 'mp4[height<=720]', // 720p max for performance
-        output_template: `temp_${clip.job_id}_%(title)s.%(ext)s`
+        format: 'mp4[height<=720]',
+        output_template: `video_${clip.job_id}.%(ext)s`
       })
     });
 
     if (!downloadResponse.ok) {
-      throw new Error(`Video download failed: ${downloadResponse.statusText}`);
+      const errorText = await downloadResponse.text();
+      console.error('Download failed:', errorText);
+      throw new Error(`Video download failed: ${downloadResponse.status} - ${errorText}`);
     }
 
     const downloadResult = await downloadResponse.json();
-    const sourceVideoPath = downloadResult.output_file;
-    console.log(`Downloaded video: ${sourceVideoPath}`);
+    const sourceVideo = downloadResult.filename || `video_${clip.job_id}.mp4`;
+    console.log(`Downloaded video: ${sourceVideo}`);
 
-    // Step 2: Extract and process clip segment
-    const processResponse = await fetch(`${ffmpegServiceUrl}/process`, {
+    // Step 2: Extract clip segment
+    const clipFilename = `clip_${clip.id}_${Date.now()}.mp4`;
+    const extractResponse = await fetch(`${ffmpegServiceUrl}/api/extract`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({
-        input_file: sourceVideoPath,
+        input_file: sourceVideo,
         start_time: clip.start_time,
         duration: clip.duration_seconds,
-        output_file: `clip_${clip.id}.mp4`,
-        operations: [
-          {
-            type: 'subtitle',
-            style: clip.jobs?.captions_style || 'modern',
-            text: generateCaptions(transcript, clip.start_time, clip.end_time),
-            font_size: 24,
-            font_color: '#FFFFFF',
-            background_color: '#000000AA'
-          },
-          ...(clip.jobs?.music_enabled ? [{
-            type: 'audio_overlay',
-            audio_file: 'assets/music/upbeat_track.mp3',
-            volume: 0.3,
-            start_offset: 0
-          }] : []),
-          ...(clip.jobs?.sfx_enabled ? [{
-            type: 'sound_effects',
-            effects: ['transition_whoosh'],
-            timing: [clip.duration_seconds * 0.1] // Add whoosh at 10% through clip
-          }] : [])
-        ]
+        output_file: clipFilename
       })
     });
 
-    if (!processResponse.ok) {
-      throw new Error(`Clip processing failed: ${processResponse.statusText}`);
+    if (!extractResponse.ok) {
+      const errorText = await extractResponse.text();
+      throw new Error(`Clip extraction failed: ${extractResponse.status} - ${errorText}`);
     }
 
-    const processResult = await processResponse.json();
-    console.log(`Processed clip: ${processResult.output_file}`);
+    const extractResult = await extractResponse.json();
+    console.log(`Extracted clip: ${extractResult.output_file}`);
 
-    // Step 3: Generate thumbnails
-    const thumbnailResponse = await fetch(`${ffmpegServiceUrl}/thumbnail`, {
+    // Step 3: Add captions to the clip
+    const captionedFilename = `captioned_${clip.id}_${Date.now()}.mp4`;
+    const captionResponse = await fetch(`${ffmpegServiceUrl}/api/add-captions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({
-        input_file: processResult.output_file,
-        timestamps: ['00:00:01', '25%', '50%'], // 3 thumbnails at different points
+        input_file: extractResult.output_file,
+        output_file: captionedFilename,
+        text: clip.title,
+        style: clip.captions_style || 'modern',
+        font_size: getStyleFontSize(clip.captions_style),
+        font_color: getStyleColor(clip.captions_style),
+        background_color: getStyleBackground(clip.captions_style)
+      })
+    });
+
+    if (!captionResponse.ok) {
+      const errorText = await captionResponse.text();
+      throw new Error(`Caption processing failed: ${captionResponse.status} - ${errorText}`);
+    }
+
+    const captionResult = await captionResponse.json();
+    console.log(`Added captions: ${captionResult.output_file}`);
+
+    // Step 4: Generate thumbnails
+    const thumbnailResponse = await fetch(`${ffmpegServiceUrl}/api/thumbnail`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        input_file: captionResult.output_file,
+        timestamps: ['00:00:01', '25%', '50%'],
         output_pattern: `thumb_${clip.id}_%d.jpg`,
         size: '640x360'
       })
     });
 
-    const thumbnailResult = await thumbnailResponse.json();
-    console.log(`Generated thumbnails: ${thumbnailResult.thumbnails?.length || 0}`);
+    const thumbnailResult = thumbnailResponse.ok ? await thumbnailResponse.json() : { thumbnails: [] };
 
-    // Step 4: Upload files to Supabase Storage
+    // Step 5: Upload processed files to Supabase Storage
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     
-    // Upload main video file
-    const videoBuffer = await fetch(`${ffmpegServiceUrl}/download-file/${processResult.output_file}`).then(r => r.arrayBuffer());
+    // Upload processed video
+    const videoBuffer = await fetch(`${ffmpegServiceUrl}/api/download-file/${captionResult.output_file}`)
+      .then(r => {
+        if (!r.ok) throw new Error(`Failed to download processed video: ${r.status}`);
+        return r.arrayBuffer();
+      });
+      
     const { data: videoUpload, error: videoError } = await supabase.storage
       .from('processed-clips')
       .upload(`${clip.job_id}/${clip.id}.mp4`, videoBuffer, {
-        contentType: 'video/mp4'
+        contentType: 'video/mp4',
+        upsert: true
       });
 
-    if (videoError) throw videoError;
+    if (videoError) {
+      console.error('Video upload error:', videoError);
+      throw new Error(`Failed to upload video: ${videoError.message}`);
+    }
 
     // Upload thumbnails
     const thumbnailUrls = [];
     for (let i = 0; i < (thumbnailResult.thumbnails?.length || 0); i++) {
-      const thumbBuffer = await fetch(`${ffmpegServiceUrl}/download-file/${thumbnailResult.thumbnails[i]}`).then(r => r.arrayBuffer());
-      const { data: thumbUpload } = await supabase.storage
-        .from('thumbnails')
-        .upload(`${clip.job_id}/${clip.id}_thumb_${i + 1}.jpg`, thumbBuffer, {
-          contentType: 'image/jpeg'
-        });
-      
-      if (thumbUpload) {
-        thumbnailUrls.push(`${supabaseUrl}/storage/v1/object/public/thumbnails/${thumbUpload.path}`);
+      try {
+        const thumbBuffer = await fetch(`${ffmpegServiceUrl}/api/download-file/${thumbnailResult.thumbnails[i]}`)
+          .then(r => r.arrayBuffer());
+          
+        const { data: thumbUpload } = await supabase.storage
+          .from('thumbnails')
+          .upload(`${clip.job_id}/${clip.id}_thumb_${i + 1}.jpg`, thumbBuffer, {
+            contentType: 'image/jpeg',
+            upsert: true
+          });
+        
+        if (thumbUpload) {
+          thumbnailUrls.push(`${supabaseUrl}/storage/v1/object/public/thumbnails/${thumbUpload.path}`);
+        }
+      } catch (thumbError) {
+        console.error(`Failed to process thumbnail ${i + 1}:`, thumbError);
       }
     }
 
     // Generate subtitle files
-    const subtitles = generateSubtitleFiles(transcript, clip.start_time, clip.end_time);
+    const subtitleContent = clip.transcript_segment || clip.title;
+    const subtitles = generateSubtitleFiles(subtitleContent, 0, clip.duration_seconds);
     const subtitleUrls = [];
     
     for (const [format, content] of Object.entries(subtitles)) {
       const { data: subUpload } = await supabase.storage
         .from('subtitles')
         .upload(`${clip.job_id}/${clip.id}.${format}`, content, {
-          contentType: format === 'vtt' ? 'text/vtt' : 'text/plain'
+          contentType: format === 'vtt' ? 'text/vtt' : 'text/plain',
+          upsert: true
         });
       
       if (subUpload) {
@@ -686,14 +755,18 @@ async function processClipWithFFmpeg(clip: any, videoMetadata: any, transcript: 
       }
     }
 
-    // Cleanup temporary files on FFmpeg service
-    await fetch(`${ffmpegServiceUrl}/cleanup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        files: [sourceVideoPath, processResult.output_file, ...(thumbnailResult.thumbnails || [])]
-      })
-    }).catch(() => {/* Ignore cleanup errors */});
+    // Cleanup temporary files
+    try {
+      await fetch(`${ffmpegServiceUrl}/api/cleanup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          files: [sourceVideo, extractResult.output_file, captionResult.output_file, ...(thumbnailResult.thumbnails || [])]
+        })
+      });
+    } catch {
+      console.warn('Cleanup request failed, but continuing...');
+    }
 
     return {
       video_url: `${supabaseUrl}/storage/v1/object/public/processed-clips/${videoUpload.path}`,
@@ -705,52 +778,45 @@ async function processClipWithFFmpeg(clip: any, videoMetadata: any, transcript: 
     };
 
   } catch (error) {
-    console.error('FFmpeg processing error:', error);
-    throw new Error(`Video processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    console.error('FFmpeg processing error for clip', clip.id, ':', error);
+    throw new Error(`Clip processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
 
-function generateCaptions(transcript: string, startTime: number, endTime: number): string {
-  // Extract relevant portion of transcript for this clip
-  const words = transcript.split(' ');
-  const duration = endTime - startTime;
-  const totalDuration = 300; // Assume 5min average video for calculation
-  const wordsPerSecond = words.length / totalDuration;
-  const startWordIndex = Math.floor(startTime * wordsPerSecond);
-  const endWordIndex = Math.floor(endTime * wordsPerSecond);
-  
-  return words.slice(startWordIndex, endWordIndex).join(' ');
+function getStyleFontSize(style: string): number {
+  switch (style) {
+    case 'bold': return 28;
+    case 'neon': return 26;
+    case 'classic': return 22;
+    default: return 24;
+  }
 }
 
-function generateSubtitleFiles(transcript: string, startTime: number, endTime: number): { vtt: string; srt: string } {
-  const captionText = generateCaptions(transcript, startTime, endTime);
-  const words = captionText.split(' ');
-  const duration = endTime - startTime;
-  
-  // Generate VTT format
-  let vttContent = 'WEBVTT\n\n';
-  let srtContent = '';
-  let index = 1;
-  
-  // Split into 3-4 second segments for readability
-  const segmentDuration = 3.5;
-  const wordsPerSegment = Math.ceil(words.length / (duration / segmentDuration));
-  
-  for (let i = 0; i < words.length; i += wordsPerSegment) {
-    const segmentWords = words.slice(i, i + wordsPerSegment);
-    const segmentStart = (i / words.length) * duration;
-    const segmentEnd = Math.min(((i + wordsPerSegment) / words.length) * duration, duration);
-    
-    const startTimeStr = formatTimestamp(segmentStart);
-    const endTimeStr = formatTimestamp(segmentEnd);
-    
-    // VTT format
-    vttContent += `${startTimeStr} --> ${endTimeStr}\n${segmentWords.join(' ')}\n\n`;
-    
-    // SRT format
-    srtContent += `${index}\n${startTimeStr.replace('.', ',')} --> ${endTimeStr.replace('.', ',')}\n${segmentWords.join(' ')}\n\n`;
-    index++;
+function getStyleColor(style: string): string {
+  switch (style) {
+    case 'bold': return '#FFFFFF';
+    case 'neon': return '#00FFFF';
+    case 'classic': return '#000000';
+    default: return '#FFFFFF';
   }
+}
+
+function getStyleBackground(style: string): string {
+  switch (style) {
+    case 'bold': return '#000000CC';
+    case 'neon': return '#FF00FFAA';
+    case 'classic': return '#FFFFFF99';
+    default: return '#000000AA';
+  }
+}
+
+function generateSubtitleFiles(text: string, startTime: number, duration: number): { vtt: string; srt: string } {
+  const endTime = startTime + duration;
+  const startTimeStr = formatTimestamp(startTime);
+  const endTimeStr = formatTimestamp(endTime);
+  
+  const vttContent = `WEBVTT\n\n${startTimeStr} --> ${endTimeStr}\n${text}\n\n`;
+  const srtContent = `1\n${startTimeStr.replace('.', ',')} --> ${endTimeStr.replace('.', ',')}\n${text}\n\n`;
   
   return { vtt: vttContent, srt: srtContent };
 }

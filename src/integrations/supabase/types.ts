@@ -140,88 +140,56 @@ export type Database = {
           user_id?: string
           video_url?: string | null
         }
-        Relationships: [
-          {
-            foreignKeyName: "clips_job_id_fkey"
-            columns: ["job_id"]
-            isOneToOne: false
-            referencedRelation: "jobs"
-            referencedColumns: ["id"]
-          },
-        ]
+        Relationships: []
       }
       jobs: {
         Row: {
-          captions_style: Database["public"]["Enums"]["caption_style"] | null
-          completed_at: string | null
-          created_at: string
-          current_stage: string | null
-          download_url: string | null
-          error_message: string | null
+          clips: Json | null
+          created_at: string | null
+          expires_at: string | null
+          ffmpeg_job_id: string | null
           id: string
-          max_clips: number | null
-          max_duration: number | null
-          min_duration: number | null
-          music_enabled: boolean | null
-          progress_percent: number | null
-          segments_data: Json | null
-          sfx_enabled: boolean | null
-          started_at: string | null
-          status: Database["public"]["Enums"]["job_status"]
-          title: string | null
-          transcript_data: Json | null
-          updated_at: string
-          user_id: string
+          metadata: Json | null
+          options: Json | null
+          progress: number | null
+          source_url: string
+          stage: string | null
+          status: string
+          updated_at: string | null
+          user_id: string | null
           video_id: string | null
-          youtube_url: string
         }
         Insert: {
-          captions_style?: Database["public"]["Enums"]["caption_style"] | null
-          completed_at?: string | null
-          created_at?: string
-          current_stage?: string | null
-          download_url?: string | null
-          error_message?: string | null
+          clips?: Json | null
+          created_at?: string | null
+          expires_at?: string | null
+          ffmpeg_job_id?: string | null
           id?: string
-          max_clips?: number | null
-          max_duration?: number | null
-          min_duration?: number | null
-          music_enabled?: boolean | null
-          progress_percent?: number | null
-          segments_data?: Json | null
-          sfx_enabled?: boolean | null
-          started_at?: string | null
-          status?: Database["public"]["Enums"]["job_status"]
-          title?: string | null
-          transcript_data?: Json | null
-          updated_at?: string
-          user_id: string
+          metadata?: Json | null
+          options?: Json | null
+          progress?: number | null
+          source_url: string
+          stage?: string | null
+          status?: string
+          updated_at?: string | null
+          user_id?: string | null
           video_id?: string | null
-          youtube_url: string
         }
         Update: {
-          captions_style?: Database["public"]["Enums"]["caption_style"] | null
-          completed_at?: string | null
-          created_at?: string
-          current_stage?: string | null
-          download_url?: string | null
-          error_message?: string | null
+          clips?: Json | null
+          created_at?: string | null
+          expires_at?: string | null
+          ffmpeg_job_id?: string | null
           id?: string
-          max_clips?: number | null
-          max_duration?: number | null
-          min_duration?: number | null
-          music_enabled?: boolean | null
-          progress_percent?: number | null
-          segments_data?: Json | null
-          sfx_enabled?: boolean | null
-          started_at?: string | null
-          status?: Database["public"]["Enums"]["job_status"]
-          title?: string | null
-          transcript_data?: Json | null
-          updated_at?: string
-          user_id?: string
+          metadata?: Json | null
+          options?: Json | null
+          progress?: number | null
+          source_url?: string
+          stage?: string | null
+          status?: string
+          updated_at?: string | null
+          user_id?: string | null
           video_id?: string | null
-          youtube_url?: string
         }
         Relationships: []
       }

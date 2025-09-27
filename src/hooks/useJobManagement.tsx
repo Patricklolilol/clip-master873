@@ -5,13 +5,19 @@ import { useToast } from '@/hooks/use-toast';
 
 interface Job {
   id: string;
+  user_id: string;
+  source_url: string;
+  video_id: string | null;
   status: string;
-  progress_percent: number;
-  current_stage: string;
-  youtube_url: string;
-  title?: string;
+  stage: string | null;
+  progress: number;
+  metadata: any;
+  options: any;
+  clips: any;
+  ffmpeg_job_id: string | null;
   created_at: string;
   updated_at: string;
+  expires_at: string;
 }
 
 interface Clip {
@@ -38,26 +44,29 @@ export const useJobManagement = () => {
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [isCanceled, setIsCanceled] = useState(false);
 
-  // Create a new job
+  // Create a new job using the new edge function
   const createJob = async (jobData: {
-    youtube_url: string;
-    max_clips: number;
-    min_duration: number;
-    max_duration: number;
-    captions_style: 'modern' | 'bold' | 'neon' | 'classic';
-    music_enabled: boolean;
-    sfx_enabled: boolean;
+    videoUrl: string;
+    options: {
+      captions: string;
+      music: boolean;
+      sfx: boolean;
+    };
   }) => {
     if (!user) return null;
     
     setIsLoading(true);
     try {
-      const { data, error } = await supabase.functions.invoke('create-job', {
+      const { data, error } = await supabase.functions.invoke('jobs-create', {
         body: jobData
       });
 
       if (error) {
         throw error;
+      }
+
+      if (data.error) {
+        throw new Error(data.error);
       }
 
       toast({
@@ -66,7 +75,7 @@ export const useJobManagement = () => {
       });
 
       // Set current job ID and reset canceled state
-      setCurrentJobId(data?.job_id || null);
+      setCurrentJobId(data?.jobId || null);
       setIsCanceled(false);
 
       // Refresh jobs list
@@ -101,7 +110,7 @@ export const useJobManagement = () => {
         throw error;
       }
 
-      setJobs(data || []);
+      setJobs(data as Job[] || []);
     } catch (error) {
       console.error('Error fetching jobs:', error);
     }
@@ -179,7 +188,7 @@ export const useJobManagement = () => {
     };
   }, [user]);
 
-  // Enhanced cancel job with better error handling
+  // Cancel job using the new edge function
   const cancelJob = async (jobId?: string) => {
     const jobToCancel = jobId || currentJobId;
     if (!jobToCancel) {
@@ -193,21 +202,16 @@ export const useJobManagement = () => {
     try {
       console.log(`Canceling job: ${jobToCancel}`);
       
-      // Mark as canceled in database with specific error message
-      const { error } = await supabase
-        .from('jobs')
-        .update({ 
-          status: 'failed',
-          error_message: 'Canceled by user',
-          current_stage: 'Canceled',
-          progress_percent: 0,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', jobToCancel);
+      const { data, error } = await supabase.functions.invoke('jobs-cancel', {
+        body: { jobId: jobToCancel }
+      });
 
       if (error) {
-        console.error('Error canceling job:', error);
         throw error;
+      }
+
+      if (data.error) {
+        throw new Error(data.error);
       }
 
       console.log(`Job ${jobToCancel} canceled successfully`);
@@ -231,7 +235,7 @@ export const useJobManagement = () => {
     } catch (error) {
       console.error('Error canceling job:', error);
       
-      // Even if database update fails, reset local state
+      // Even if edge function fails, reset local state
       setIsCanceled(true);
       setCurrentJobId(null);
       setIsLoading(false);

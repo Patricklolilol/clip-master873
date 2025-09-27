@@ -183,8 +183,11 @@ export const useJobManagement = () => {
   const cancelJob = async (jobId?: string) => {
     const jobToCancel = jobId || currentJobId;
     if (!jobToCancel) {
-      console.warn('No job ID provided for cancellation');
-      return false;
+      // If no job to cancel, just reset state and return success
+      setIsCanceled(true);
+      setCurrentJobId(null);
+      setIsLoading(false);
+      return true;
     }
 
     try {

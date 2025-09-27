@@ -94,7 +94,10 @@ serve(async (req) => {
     // Trigger the video processing pipeline using direct function invocation
     try {
       const processResponse = await supabase.functions.invoke('process-video', {
-        body: { job_id: job.id }
+        body: { job_id: job.id },
+        headers: {
+          Authorization: `Bearer ${supabaseServiceKey}`,
+        }
       });
 
       if (processResponse.error) {

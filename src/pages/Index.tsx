@@ -422,7 +422,13 @@ const Index = () => {
       </section>
 
       {/* Processing Modal */}
-      <Dialog open={isProcessing} onOpenChange={() => {}}>
+      <Dialog open={isProcessing} onOpenChange={(open) => {
+        // Allow closing only if not actually processing
+        if (!open && !currentJob) {
+          setShowDashboard(false);
+          setForceInputView(true);
+        }
+      }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Generating Your Clips</DialogTitle>
@@ -441,6 +447,19 @@ const Index = () => {
             <div className="text-sm text-muted-foreground">
               Processing stages: Download → Transcribe → Detect Highlights → Create Clips → Upload
             </div>
+            {/* Emergency cancel button */}
+            {isProcessing && (
+              <div className="pt-4 border-t">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={handleNewVideo}
+                  className="w-full"
+                >
+                  Cancel & Start New Video
+                </Button>
+              </div>
+            )}
           </div>
         </DialogContent>
       </Dialog>

@@ -594,7 +594,7 @@ async function createClips(supabase: any, job: Job, highlights: any[]) {
 
 async function processClipWithFFmpeg(clip: any, videoMetadata: any, fullTranscript: string) {
   const processingStartTime = Date.now();
-  const ffmpegServiceUrl = Deno.env.get('FFMPEG_SERVICE_URL') || 'https://ffmpeg-service-production-0e87.up.railway.app';
+  const ffmpegServiceUrl = Deno.env.get('FFMPEG_SERVICE_URL') || 'https://ffmpeg-service-production-79e5.up.railway.app';
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   

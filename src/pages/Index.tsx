@@ -20,6 +20,7 @@ const Index = () => {
   
   const [url, setUrl] = useState('');
   const [showDashboard, setShowDashboard] = useState(false);
+  const [forceInputView, setForceInputView] = useState(false);
   const [clipCount, setClipCount] = useState([3]);
   const [clipLength, setClipLength] = useState([15, 45]);
   const [musicEnabled, setMusicEnabled] = useState(true);
@@ -46,15 +47,29 @@ const Index = () => {
     const result = await createJob(jobData);
     if (result) {
       setShowDashboard(true);
+      setForceInputView(false);
     }
+  };
+
+  const handleNewVideo = () => {
+    setUrl('');
+    setShowDashboard(false);
+    setForceInputView(true);
+    // Focus the input field after state update
+    setTimeout(() => {
+      const urlInput = document.getElementById('video-url');
+      if (urlInput) {
+        urlInput.focus();
+      }
+    }, 100);
   };
 
   const handleSignOut = async () => {
     await signOut();
   };
 
-  // Show clips dashboard if we have clips or are processing
-  const shouldShowDashboard = showDashboard || clips.length > 0 || isProcessing;
+  // Show clips dashboard logic - forceInputView takes precedence
+  const shouldShowDashboard = !forceInputView && (showDashboard || clips.length > 0 || isProcessing);
 
   if (shouldShowDashboard) {
     return (
@@ -70,7 +85,7 @@ const Index = () => {
             <div className="flex items-center gap-4">
               <Button
                 variant="outline"
-                onClick={() => setShowDashboard(false)}
+                onClick={handleNewVideo}
                 className="hidden md:flex"
               >
                 New Video
@@ -170,7 +185,7 @@ const Index = () => {
                       : "Create your first viral clip by processing a YouTube video."}
                   </p>
                   {!isProcessing && (
-                    <Button onClick={() => setShowDashboard(false)}>
+                    <Button onClick={handleNewVideo}>
                       Process New Video
                     </Button>
                   )}

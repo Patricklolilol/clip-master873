@@ -69,19 +69,43 @@ export const useJobManagement = () => {
         throw new Error(data.error);
       }
 
-      toast({
-        title: "Job Created!",
-        description: "Your video is now being processed. You'll see updates in real-time.",
-      });
-
-      // Set current job ID and reset canceled state
-      setCurrentJobId(data?.jobId || null);
-      setIsCanceled(false);
-
-      // Refresh jobs list
-      await fetchJobs();
+      // Handle synchronous completion
+      if (data.status === 'completed' && data.clips) {
+        toast({
+          title: "Clips Generated!",
+          description: `${data.clips.length} items are ready for download.`,
+        });
+        
+        // No ongoing job to track for sync completion
+        setCurrentJobId(null);
+        setIsCanceled(false);
+        
+        // Refresh jobs list to show the completed job
+        await fetchJobs();
+        
+        return data;
+      }
       
-      return data;
+      // Handle asynchronous processing
+      if (data.jobId) {
+        toast({
+          title: "Job Created!",
+          description: "Your video is now being processed. You'll see updates in real-time.",
+        });
+
+        // Set current job ID and reset canceled state for polling
+        setCurrentJobId(data.jobId);
+        setIsCanceled(false);
+
+        // Refresh jobs list
+        await fetchJobs();
+        
+        return data;
+      }
+      
+      // Fallback case
+      throw new Error("Unexpected response format from job creation");
+      
     } catch (error: any) {
       console.error('Error creating job:', error);
       toast({

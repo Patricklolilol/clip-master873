@@ -103,21 +103,44 @@ const ClipMaster = () => {
         return;
       }
 
-      setCurrentJob({
-        jobId: data.jobId,
-        status: data.status,
-        stage: 'Queued',
-        progress: 0,
-        metadata: data.metadata
-      });
+      // Handle synchronous completion
+      if (data.status === 'completed' && data.clips) {
+        setCurrentJob({
+          jobId: data.jobId || 'completed',
+          status: 'completed',
+          stage: 'Completed',
+          progress: 100,
+          clips: data.clips,
+          metadata: data.metadata
+        });
 
-      // Start polling for job status
-      startPolling(data.jobId);
+        toast({
+          title: "Clips generated successfully!",
+          description: `${data.clips.length} clips are ready for download`
+        });
+        return;
+      }
 
-      toast({
-        title: "Job created successfully",
-        description: "Processing has started"
-      });
+      // Handle asynchronous processing
+      if (data.jobId) {
+        setCurrentJob({
+          jobId: data.jobId,
+          status: data.status,
+          stage: 'Queued',
+          progress: 0,
+          metadata: data.metadata
+        });
+
+        // Start polling for job status
+        startPolling(data.jobId);
+
+        toast({
+          title: "Job created successfully",
+          description: "Processing has started"
+        });
+      } else {
+        setError('❌ Failed to create job');
+      }
     } catch (err) {
       console.error('Error creating job:', err);
       setError('❌ Failed to create clip generation job');
@@ -133,11 +156,6 @@ const ClipMaster = () => {
 
     pollingRef.current = setInterval(async () => {
       try {
-        const { data, error } = await supabase.functions.invoke('jobs-status', {
-          body: {},
-          method: 'GET'
-        });
-
         // Get current session for auth
         const session = await supabase.auth.getSession();
         const response = await fetch(`https://pskxileirrvjnuiadfcd.supabase.co/functions/v1/jobs-status?jobId=${jobId}`, {
@@ -168,11 +186,12 @@ const ClipMaster = () => {
               description: `${statusData.clips?.length || 0} clips are ready for download`
             });
           } else if (statusData.status === 'failed') {
-            setError('❌ Video processing failed. Please try another video');
+            setError(statusData.error || '❌ Video processing failed. Please try another video');
           }
         }
       } catch (err) {
         console.error('Error polling job status:', err);
+        setError('❌ Could not read job status');
       }
     }, 2000);
   };
@@ -355,32 +374,27 @@ const ClipMaster = () => {
               {/* Clips Display */}
               {currentJob.clips && currentJob.clips.length > 0 && (
                 <div className="space-y-4">
-                  <h4 className="font-semibold text-lg">Generated Clips</h4>
+                  <h4 className="font-semibold text-lg">Generated Content</h4>
                   <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                     {currentJob.clips.map((clip: any, index: number) => (
                       <Card key={index} className="overflow-hidden">
                         <CardContent className="p-4">
-                          {clip.thumbnail && (
-                            <img 
-                              src={clip.thumbnail} 
-                              alt={`Clip ${index + 1}`}
-                              className="w-full h-32 object-cover rounded mb-2"
-                            />
-                          )}
-                          <h5 className="font-medium">{clip.title || `Clip ${index + 1}`}</h5>
+                          <h5 className="font-medium">{clip.name || `Item ${index + 1}`}</h5>
                           <p className="text-sm text-muted-foreground">
-                            Duration: {clip.duration}s
+                            Type: {clip.type || 'Unknown'}
+                            {clip.size && ` | Size: ${Math.round(clip.size / 1024)}KB`}
+                            {clip.timestamp && ` | Time: ${clip.timestamp}s`}
                           </p>
-                          {clip.downloadUrl && (
+                          {clip.url && (
                             <Button 
                               asChild 
                               variant="outline" 
                               size="sm" 
                               className="w-full mt-2"
                             >
-                              <a href={clip.downloadUrl} download>
+                              <a href={clip.url} target="_blank" rel="noopener noreferrer">
                                 <Download className="h-4 w-4 mr-1" />
-                                Download
+                                {clip.type === 'video' ? 'Download Video' : 'View'}
                               </a>
                             </Button>
                           )}

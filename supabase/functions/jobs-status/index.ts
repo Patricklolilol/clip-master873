@@ -74,47 +74,95 @@ serve(async (req) => {
       });
     }
 
-    // If job is not in final state and has FFmpeg job ID, check FFmpeg service
+    // Check if job has been queued too long and should be marked as failed
+    const jobCreatedAt = new Date(job.created_at);
+    const now = new Date();
+    const timeDiffMinutes = (now.getTime() - jobCreatedAt.getTime()) / (1000 * 60);
+
+    // If job is not in final state, check various conditions
     const finalStates = ['completed', 'failed', 'cancelled'];
-    if (!finalStates.includes(job.status) && job.ffmpeg_job_id && ffmpegServiceUrl) {
-      try {
-        const ffmpegResponse = await fetch(`${ffmpegServiceUrl}/jobs/${job.ffmpeg_job_id}/status`);
+    if (!finalStates.includes(job.status)) {
+      
+      // If job has been queued for more than 60 seconds without progress, mark as failed
+      if (job.status === 'queued' && timeDiffMinutes > 1) {
+        console.log(`Job ${jobId} has been queued for ${timeDiffMinutes} minutes, marking as failed`);
         
-        if (ffmpegResponse.ok) {
-          const ffmpegData = await ffmpegResponse.json();
-          
-          // Update Supabase job with latest progress
-          const updateData: any = {
+        const { data: failedJob } = await supabase
+          .from('jobs')
+          .update({
+            status: 'failed',
+            stage: 'Failed - Processing timeout',
             updated_at: new Date().toISOString()
-          };
+          })
+          .eq('id', jobId)
+          .select()
+          .single();
 
-          if (ffmpegData.status) updateData.status = ffmpegData.status;
-          if (ffmpegData.stage) updateData.stage = ffmpegData.stage;
-          if (ffmpegData.progress !== undefined) updateData.progress = ffmpegData.progress;
-          if (ffmpegData.clips) updateData.clips = ffmpegData.clips;
-
-          const { data: updatedJob } = await supabase
-            .from('jobs')
-            .update(updateData)
-            .eq('id', jobId)
-            .select()
-            .single();
-
-          if (updatedJob) {
-            return new Response(JSON.stringify({
-              jobId: updatedJob.id,
-              status: updatedJob.status,
-              stage: updatedJob.stage,
-              progress: updatedJob.progress,
-              clips: updatedJob.clips,
-              metadata: updatedJob.metadata
-            }), {
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-            });
-          }
+        if (failedJob) {
+          return new Response(JSON.stringify({
+            jobId: failedJob.id,
+            status: failedJob.status,
+            stage: failedJob.stage,
+            progress: failedJob.progress,
+            clips: failedJob.clips,
+            metadata: failedJob.metadata,
+            error: '❌ Clip creation failed. Please check FFmpeg service'
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
         }
-      } catch (ffmpegError) {
-        console.error('Error checking FFmpeg status:', ffmpegError);
+      }
+      
+      // If job has FFmpeg job ID and service supports status endpoint, check it
+      if (job.ffmpeg_job_id && ffmpegServiceUrl) {
+        try {
+          const ffmpegApiKey = Deno.env.get('FFMPEG_API_KEY');
+          const ffmpegHeaders: Record<string, string> = {};
+          
+          if (ffmpegApiKey) {
+            ffmpegHeaders['X-API-Key'] = ffmpegApiKey;
+          }
+
+          const ffmpegResponse = await fetch(`${ffmpegServiceUrl}/jobs/${job.ffmpeg_job_id}/status`, {
+            headers: ffmpegHeaders
+          });
+          
+          if (ffmpegResponse.ok) {
+            const ffmpegData = await ffmpegResponse.json();
+            
+            // Update Supabase job with latest progress
+            const updateData: any = {
+              updated_at: new Date().toISOString()
+            };
+
+            if (ffmpegData.status) updateData.status = ffmpegData.status;
+            if (ffmpegData.stage) updateData.stage = ffmpegData.stage;
+            if (ffmpegData.progress !== undefined) updateData.progress = ffmpegData.progress;
+            if (ffmpegData.clips) updateData.clips = ffmpegData.clips;
+
+            const { data: updatedJob } = await supabase
+              .from('jobs')
+              .update(updateData)
+              .eq('id', jobId)
+              .select()
+              .single();
+
+            if (updatedJob) {
+              return new Response(JSON.stringify({
+                jobId: updatedJob.id,
+                status: updatedJob.status,
+                stage: mapStage(updatedJob.stage),
+                progress: updatedJob.progress,
+                clips: updatedJob.clips,
+                metadata: updatedJob.metadata
+              }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+              });
+            }
+          }
+        } catch (ffmpegError) {
+          console.error('Error checking FFmpeg status:', ffmpegError);
+        }
       }
     }
 
@@ -122,7 +170,7 @@ serve(async (req) => {
     return new Response(JSON.stringify({
       jobId: job.id,
       status: job.status,
-      stage: job.stage,
+      stage: mapStage(job.stage),
       progress: job.progress,
       clips: job.clips,
       metadata: job.metadata
@@ -140,3 +188,24 @@ serve(async (req) => {
     });
   }
 });
+
+// Helper function to map stages to user-friendly names
+const mapStage = (stage: string | null): string => {
+  if (!stage) return 'Queued';
+  
+  const stageMap: Record<string, string> = {
+    'Queued': 'Queued',
+    'Processing': 'Downloading',
+    'Download': 'Downloading', 
+    'Transcribe': 'Transcribing',
+    'Detect Highlights': 'Detecting Highlights',
+    'Create Clips': 'Creating Clips',
+    'Upload': 'Uploading',
+    'Completed': 'Completed',
+    'Failed': 'Failed',
+    'Cancelled': 'Cancelled',
+    'Cancelled by user': 'Cancelled'
+  };
+  
+  return stageMap[stage] || stage;
+};

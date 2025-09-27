@@ -16,6 +16,13 @@ interface JobsCreateRequest {
   };
 }
 
+// Helper function to make absolute URLs from FFmpeg response
+const makeAbsoluteUrl = (url: string, baseUrl: string): string => {
+  if (url.startsWith('http')) return url;
+  if (url.startsWith('/')) return `${baseUrl}${url}`;
+  return `${baseUrl}/${url}`;
+};
+
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -26,7 +33,8 @@ serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const youtubeApiKey = Deno.env.get('YOUTUBE_API_KEY');
-    const ffmpegServiceUrl = Deno.env.get('FFMPEG_SERVICE_URL');
+    const ffmpegServiceUrl = Deno.env.get('FFMPEG_SERVICE_URL') || 'https://ffmpeg-service-production-79e5.up.railway.app';
+    const ffmpegApiKey = Deno.env.get('FFMPEG_API_KEY');
 
     if (!youtubeApiKey) {
       return new Response(JSON.stringify({
@@ -119,78 +127,235 @@ serve(async (req) => {
       statistics: video.statistics
     };
 
-    // Create job in Supabase
-    const { data: job, error: jobError } = await supabase
-      .from('jobs')
-      .insert({
-        user_id: user.id,
-        source_url: videoUrl,
-        video_id: videoId,
-        status: 'queued',
-        stage: 'Queued',
-        progress: 0,
-        metadata,
-        options,
-        clips: null
-      })
-      .select()
-      .single();
+    console.log(`Processing video: ${metadata.title}`);
+    console.log(`FFmpeg service URL: ${ffmpegServiceUrl}`);
 
-    if (jobError) {
-      console.error('Job creation error:', jobError);
+    // Build FFmpeg payload
+    const ffmpegPayload = {
+      media_url: videoUrl,
+      extract_info: true,
+      take_screenshots: true,
+      screenshot_count: 3,
+      convert_format: "mp4",
+      // Include user options if provided
+      ...(options.captions && { captions: options.captions }),
+      ...(options.music !== undefined && { music: options.music }),
+      ...(options.sfx !== undefined && { sfx: options.sfx })
+    };
+
+    console.log('FFmpeg payload:', JSON.stringify(ffmpegPayload, null, 2));
+
+    // Call FFmpeg service
+    try {
+      const ffmpegHeaders: Record<string, string> = {
+        'Content-Type': 'application/json'
+      };
+      
+      if (ffmpegApiKey) {
+        ffmpegHeaders['X-API-Key'] = ffmpegApiKey;
+      }
+
+      console.log('Calling FFmpeg service at:', `${ffmpegServiceUrl}/process`);
+      
+      const ffmpegResponse = await fetch(`${ffmpegServiceUrl}/process`, {
+        method: 'POST',
+        headers: ffmpegHeaders,
+        body: JSON.stringify(ffmpegPayload)
+      });
+
+      console.log('FFmpeg response status:', ffmpegResponse.status);
+      const responseText = await ffmpegResponse.text();
+      console.log('FFmpeg response body:', responseText);
+
+      // Handle different response scenarios
+      if (ffmpegResponse.status === 401 || ffmpegResponse.status === 403) {
+        return new Response(JSON.stringify({
+          error: ffmpegApiKey ? '❌ Invalid FFmpeg API key' : '⚠️ Missing API key'
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      if (!ffmpegResponse.ok) {
+        console.error('FFmpeg service error:', responseText);
+        
+        // Create failed job record
+        const { data: failedJob } = await supabase
+          .from('jobs')
+          .insert({
+            user_id: user.id,
+            source_url: videoUrl,
+            video_id: videoId,
+            status: 'failed',
+            stage: 'Failed',
+            progress: 0,
+            metadata,
+            options,
+            clips: null
+          })
+          .select()
+          .single();
+
+        return new Response(JSON.stringify({
+          error: '❌ Clip creation failed. Please check FFmpeg service',
+          jobId: failedJob?.id || null,
+          status: 'failed'
+        }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      let ffmpegData;
+      try {
+        ffmpegData = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('Failed to parse FFmpeg response:', parseError);
+        throw new Error('Invalid JSON response from FFmpeg service');
+      }
+
+      console.log('Parsed FFmpeg data:', JSON.stringify(ffmpegData, null, 2));
+
+      // Check if response indicates success with synchronous completion
+      if (ffmpegData.code === 0 && ffmpegData.data) {
+        const data = ffmpegData.data;
+        
+        // Process clips from FFmpeg response
+        const processedClips = [];
+        
+        // Handle screenshots
+        if (data.screenshots && Array.isArray(data.screenshots)) {
+          data.screenshots.forEach((screenshot: any, index: number) => {
+            const absoluteUrl = makeAbsoluteUrl(screenshot.url || screenshot, ffmpegServiceUrl);
+            processedClips.push({
+              name: `Screenshot ${index + 1}`,
+              url: absoluteUrl,
+              type: 'screenshot',
+              timestamp: screenshot.timestamp || index * 10
+            });
+          });
+        }
+        
+        // Handle converted video
+        if (data.conversion && data.conversion.url) {
+          const absoluteUrl = makeAbsoluteUrl(data.conversion.url, ffmpegServiceUrl);
+          processedClips.push({
+            name: 'Converted Video',
+            url: absoluteUrl,
+            type: 'video',
+            size: data.conversion.size || null
+          });
+        }
+
+        console.log('Processed clips:', processedClips);
+
+        // Create completed job record
+        const { data: completedJob, error: jobError } = await supabase
+          .from('jobs')
+          .insert({
+            user_id: user.id,
+            source_url: videoUrl,
+            video_id: videoId,
+            status: 'completed',
+            stage: 'Completed',
+            progress: 100,
+            metadata,
+            options,
+            clips: processedClips,
+            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours from now
+          })
+          .select()
+          .single();
+
+        if (jobError) {
+          console.error('Failed to create completed job:', jobError);
+          throw new Error('Failed to save job results');
+        }
+
+        console.log('Job completed successfully:', completedJob.id);
+
+        return new Response(JSON.stringify({
+          jobId: null, // null for synchronous completion
+          status: 'completed',
+          clips: processedClips,
+          metadata
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // Handle async response (if FFmpeg returns jobId)
+      else if (ffmpegData.jobId && ffmpegData.status) {
+        console.log('Async job created:', ffmpegData.jobId);
+        
+        const { data: asyncJob, error: jobError } = await supabase
+          .from('jobs')
+          .insert({
+            user_id: user.id,
+            source_url: videoUrl,
+            video_id: videoId,
+            ffmpeg_job_id: ffmpegData.jobId,
+            status: ffmpegData.status,
+            stage: 'Processing',
+            progress: 0,
+            metadata,
+            options,
+            clips: null,
+            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+          })
+          .select()
+          .single();
+
+        if (jobError) {
+          console.error('Failed to create async job:', jobError);
+          throw new Error('Failed to create job record');
+        }
+
+        return new Response(JSON.stringify({
+          jobId: asyncJob.id,
+          status: ffmpegData.status,
+          metadata
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // Unexpected response format
+      else {
+        console.error('Unexpected FFmpeg response format:', ffmpegData);
+        throw new Error('Unexpected response format from FFmpeg service');
+      }
+
+    } catch (ffmpegError) {
+      console.error('Error calling FFmpeg service:', ffmpegError);
+      
+      // Create failed job record
+      const { data: failedJob } = await supabase
+        .from('jobs')
+        .insert({
+          user_id: user.id,
+          source_url: videoUrl,
+          video_id: videoId,
+          status: 'failed',
+          stage: 'Failed',
+          progress: 0,
+          metadata,
+          options,
+          clips: null
+        })
+        .select()
+        .single();
+
       return new Response(JSON.stringify({
-        error: '❌ Clip creation failed. Please check FFmpeg service'
+        error: '❌ Clip creation failed. Please check FFmpeg service',
+        jobId: failedJob?.id || null,
+        status: 'failed'
       }), {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
-
-    // Send job to FFmpeg service
-    if (ffmpegServiceUrl) {
-      try {
-        const ffmpegResponse = await fetch(`${ffmpegServiceUrl}/jobs`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            videoUrl,
-            options,
-            metadata,
-            callbackJobId: job.id
-          })
-        });
-
-        if (ffmpegResponse.ok) {
-          const ffmpegData = await ffmpegResponse.json();
-          
-          // Update job with FFmpeg job ID
-          await supabase
-            .from('jobs')
-            .update({ 
-              ffmpeg_job_id: ffmpegData.jobId,
-              status: ffmpegData.status || 'processing',
-              stage: 'Processing'
-            })
-            .eq('id', job.id);
-
-          console.log('Job sent to FFmpeg service successfully:', ffmpegData.jobId);
-        } else {
-          console.error('FFmpeg service error:', await ffmpegResponse.text());
-        }
-      } catch (ffmpegError) {
-        console.error('Error sending to FFmpeg service:', ffmpegError);
-      }
-    }
-
-    return new Response(JSON.stringify({
-      jobId: job.id,
-      status: job.status,
-      metadata
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
 
   } catch (error) {
     console.error('Error in jobs-create:', error);

@@ -80,12 +80,21 @@ serve(async (req) => {
     // Call FFmpeg cancel endpoint if job has FFmpeg ID
     if (job.ffmpeg_job_id && ffmpegServiceUrl) {
       try {
+        const ffmpegApiKey = Deno.env.get('FFMPEG_API_KEY');
+        const ffmpegHeaders: Record<string, string> = {};
+        
+        if (ffmpegApiKey) {
+          ffmpegHeaders['X-API-Key'] = ffmpegApiKey;
+        }
+
         await fetch(`${ffmpegServiceUrl}/jobs/${job.ffmpeg_job_id}/cancel`, {
-          method: 'POST'
+          method: 'POST',
+          headers: ffmpegHeaders
         });
         console.log('Job cancelled in FFmpeg service:', job.ffmpeg_job_id);
       } catch (ffmpegError) {
         console.error('Error cancelling FFmpeg job:', ffmpegError);
+        // Continue with local cancellation even if remote cancel fails
       }
     }
 

@@ -117,7 +117,7 @@ serve(async (req) => {
 
 async function processClipWithExternalService(clip: any, edits: any) {
   const processingStartTime = Date.now();
-  const ffmpegServiceUrl = Deno.env.get('FFMPEG_SERVICE_URL') || 'http://localhost:8081';
+  const ffmpegServiceUrl = Deno.env.get('FFMPEG_SERVICE_URL') || 'https://ffmpeg-service-production-0e87.up.railway.app';
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   

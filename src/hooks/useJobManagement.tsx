@@ -35,6 +35,8 @@ export const useJobManagement = () => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [clips, setClips] = useState<Clip[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+  const [isCanceled, setIsCanceled] = useState(false);
 
   // Create a new job
   const createJob = async (jobData: {
@@ -62,6 +64,10 @@ export const useJobManagement = () => {
         title: "Job Created!",
         description: "Your video is now being processed. You'll see updates in real-time.",
       });
+
+      // Set current job ID and reset canceled state
+      setCurrentJobId(data?.job_id || null);
+      setIsCanceled(false);
 
       // Refresh jobs list
       await fetchJobs();
@@ -173,11 +179,70 @@ export const useJobManagement = () => {
     };
   }, [user]);
 
+  // Cancel current job
+  const cancelJob = async (jobId?: string) => {
+    const jobToCancel = jobId || currentJobId;
+    if (!jobToCancel) return false;
+
+    try {
+      // Mark as canceled in database
+      const { error } = await supabase
+        .from('jobs')
+        .update({ 
+          status: 'failed',
+          error_message: 'Canceled by user',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', jobToCancel);
+
+      if (error) {
+        console.error('Error canceling job:', error);
+        return false;
+      }
+
+      // Update local state
+      setIsCanceled(true);
+      setCurrentJobId(null);
+      setIsLoading(false);
+
+      // Show cancellation toast
+      toast({
+        title: "Clip generation canceled",
+        description: "You can start a new video now.",
+        variant: "default",
+      });
+
+      // Refresh jobs list
+      await fetchJobs();
+      
+      return true;
+    } catch (error) {
+      console.error('Error canceling job:', error);
+      toast({
+        title: "Failed to cancel job",
+        description: "There was an error canceling the job.",
+        variant: "destructive",
+      });
+      return false;
+    }
+  };
+
+  // Reset all states (for new video)
+  const resetJobState = () => {
+    setCurrentJobId(null);
+    setIsCanceled(false);
+    setIsLoading(false);
+  };
+
   return {
     jobs,
     clips,
     isLoading,
+    currentJobId,
+    isCanceled,
     createJob,
+    cancelJob,
+    resetJobState,
     fetchJobs,
     fetchClips
   };

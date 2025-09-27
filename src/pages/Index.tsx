@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
@@ -16,7 +16,7 @@ import { useJobManagement } from '@/hooks/useJobManagement';
 
 const Index = () => {
   const { user, signOut } = useAuth();
-  const { jobs, clips, isLoading: jobLoading, createJob } = useJobManagement();
+  const { jobs, clips, isLoading: jobLoading, currentJobId, isCanceled, createJob, cancelJob, resetJobState } = useJobManagement();
   
   const [url, setUrl] = useState('');
   const [showDashboard, setShowDashboard] = useState(false);
@@ -33,6 +33,9 @@ const Index = () => {
 
   const handleGenerateClips = async () => {
     if (!url.trim()) return;
+    
+    // Reset any previous canceled state
+    resetJobState();
     
     const jobData = {
       youtube_url: url,
@@ -52,9 +55,14 @@ const Index = () => {
   };
 
   const handleNewVideo = () => {
+    // Reset all job state
+    resetJobState();
+    
+    // Reset form and navigation state
     setUrl('');
     setShowDashboard(false);
     setForceInputView(true);
+    
     // Focus the input field after state update
     setTimeout(() => {
       const urlInput = document.getElementById('video-url');
@@ -64,12 +72,38 @@ const Index = () => {
     }, 100);
   };
 
+  const handleCancelJob = async () => {
+    const success = await cancelJob();
+    if (success) {
+      // Return to input screen
+      handleNewVideo();
+    }
+  };
+
   const handleSignOut = async () => {
     await signOut();
   };
 
-  // Show clips dashboard logic - forceInputView takes precedence
-  const shouldShowDashboard = !forceInputView && (showDashboard || clips.length > 0 || isProcessing);
+  // Show clips dashboard logic - forceInputView takes precedence, and don't show if canceled
+  const shouldShowDashboard = !forceInputView && !isCanceled && (showDashboard || clips.length > 0 || isProcessing);
+
+  // Clean up any stuck processing states when showing input view
+  useEffect(() => {
+    if (!shouldShowDashboard && forceInputView) {
+      // If we're forcing input view, make sure we're not showing as processing
+      if (isProcessing && currentJobId) {
+        // Check if the current job is actually stuck (older than 10 minutes)
+        const currentJob = jobs.find(job => job.id === currentJobId);
+        if (currentJob) {
+          const jobAge = Date.now() - new Date(currentJob.created_at).getTime();
+          if (jobAge > 10 * 60 * 1000) { // 10 minutes
+            console.warn('Detected stuck job, resetting state');
+            resetJobState();
+          }
+        }
+      }
+    }
+  }, [shouldShowDashboard, forceInputView, isProcessing, currentJobId, jobs, resetJobState]);
 
   if (shouldShowDashboard) {
     return (
@@ -299,10 +333,10 @@ const Index = () => {
                     />
                     <Button 
                       onClick={handleGenerateClips}
-                      disabled={!url.trim()}
+                      disabled={!url.trim() || jobLoading || isProcessing}
                       className="h-12 px-8 bg-gradient-primary hover:shadow-glow transition-all duration-300"
                     >
-                      Generate Clips
+                      {jobLoading ? 'Creating Job...' : 'Generate Clips'}
                     </Button>
                   </div>
                 </div>
@@ -423,13 +457,12 @@ const Index = () => {
 
       {/* Processing Modal */}
       <Dialog open={isProcessing} onOpenChange={(open) => {
-        // Allow closing only if not actually processing
-        if (!open && !currentJob) {
-          setShowDashboard(false);
-          setForceInputView(true);
+        // Allow closing modal by canceling the job
+        if (!open && currentJobId) {
+          handleCancelJob();
         }
       }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md" onEscapeKeyDown={handleCancelJob}>
           <DialogHeader>
             <DialogTitle>Generating Your Clips</DialogTitle>
             <DialogDescription>
@@ -447,19 +480,17 @@ const Index = () => {
             <div className="text-sm text-muted-foreground">
               Processing stages: Download → Transcribe → Detect Highlights → Create Clips → Upload
             </div>
-            {/* Emergency cancel button */}
-            {isProcessing && (
-              <div className="pt-4 border-t">
-                <Button 
-                  variant="outline" 
-                  size="sm" 
-                  onClick={handleNewVideo}
-                  className="w-full"
-                >
-                  Cancel & Start New Video
-                </Button>
-              </div>
-            )}
+            {/* Cancel button */}
+            <div className="pt-4 border-t">
+              <Button 
+                variant="outline" 
+                onClick={handleCancelJob}
+                className="w-full"
+                disabled={!currentJobId}
+              >
+                Cancel & Start New Video
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

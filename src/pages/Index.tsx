@@ -104,8 +104,20 @@ const Index = () => {
                     
                     return (
                       <Card key={clip.id} className="overflow-hidden hover:shadow-card transition-all duration-300 border-0 bg-card/50 backdrop-blur">
-                        <div className="aspect-video bg-gradient-to-br from-primary/20 to-secondary/20 relative flex items-center justify-center">
-                          <PlayCircle className="w-12 h-12 text-primary" />
+                        <div className="aspect-video bg-gradient-to-br from-primary/20 to-secondary/20 relative overflow-hidden rounded-t-lg">
+                          {clip.video_url ? (
+                            <video 
+                              src={clip.video_url} 
+                              poster={clip.thumbnail_urls?.[0]} 
+                              className="w-full h-full object-cover"
+                              controls
+                              preload="metadata"
+                            />
+                          ) : (
+                            <div className="flex items-center justify-center h-full">
+                              <PlayCircle className="w-12 h-12 text-primary" />
+                            </div>
+                          )}
                           <Badge variant="secondary" className="absolute top-2 right-2">
                             {Math.floor(clip.duration_seconds / 60)}:{String(Math.floor(clip.duration_seconds % 60)).padStart(2, '0')}
                           </Badge>
@@ -129,10 +141,19 @@ const Index = () => {
                               <Edit3 className="w-4 h-4 mr-2" />
                               Edit
                             </Button>
-                            <Button size="sm" variant="default" className="flex-1">
-                              <Download className="w-4 h-4 mr-2" />
-                              Download
-                            </Button>
+                            {clip.video_url ? (
+                              <Button size="sm" variant="default" className="flex-1" asChild>
+                                <a href={clip.video_url} download={`${clip.title}.mp4`}>
+                                  <Download className="w-4 h-4 mr-2" />
+                                  Download
+                                </a>
+                              </Button>
+                            ) : (
+                              <Button size="sm" variant="default" className="flex-1" disabled>
+                                <Download className="w-4 h-4 mr-2" />
+                                Processing...
+                              </Button>
+                            )}
                           </div>
                         </div>
                       </Card>

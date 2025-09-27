@@ -34,4 +34,7 @@ api_url = "http://127.0.0.1:54321"
 verify_jwt = true
 
 [functions.process-video]
-verify_jwt = false
+verify_jwt = true
+
+[functions.process-clips]
+verify_jwt = true

@@ -86,12 +86,56 @@ serve(async (req) => {
       .update({ segments_data: highlights })
       .eq('id', job_id);
 
-    // Step 4: Create clips
+    // Step 4: Create clips in database  
     await updateJobStatus(supabase, job_id, 'creating_clips', 75, 'Generating video clips');
     
     const clips = await createClips(supabase, job, highlights);
 
-    // Step 5: Complete processing
+    // Step 5: Process actual video files with FFmpeg service
+    await updateJobStatus(supabase, job_id, 'uploading', 85, 'Processing video files with FFmpeg');
+    
+    for (const clip of clips) {
+      try {
+        console.log(`Processing video for clip ${clip.id}`);
+        const fullTranscript = transcriptData.segments.map((seg: any) => seg.text).join(' ');
+        const processedClipData = await processClipWithFFmpeg(clip, videoMetadata, fullTranscript);
+        
+        // Update clip with processed video data
+        await supabase
+          .from('clips')
+          .update({
+            status: 'ready',
+            video_url: processedClipData.video_url,
+            thumbnail_urls: processedClipData.thumbnail_urls,
+            subtitle_urls: processedClipData.subtitle_urls,
+            file_size_bytes: processedClipData.file_size_bytes,
+            checksum: processedClipData.checksum,
+            processing_logs: {
+              processed_at: new Date().toISOString(),
+              processing_time_ms: processedClipData.processing_time_ms
+            }
+          })
+          .eq('id', clip.id);
+          
+        console.log(`Clip ${clip.id} processed successfully`);
+      } catch (clipError) {
+        console.error(`Failed to process clip ${clip.id}:`, clipError);
+        
+        // Mark clip as failed
+        await supabase
+          .from('clips')
+          .update({
+            status: 'failed',
+            processing_logs: {
+              error: clipError instanceof Error ? clipError.message : 'Processing failed',
+              failed_at: new Date().toISOString()
+            }
+          })
+          .eq('id', clip.id);
+      }
+    }
+
+    // Step 6: Complete processing
     await updateJobStatus(supabase, job_id, 'completed', 100, 'Processing complete');
 
     await supabase
@@ -513,4 +557,218 @@ async function createClips(supabase: any, job: Job, highlights: any[]) {
   }
   
   return clips;
+}
+
+async function processClipWithFFmpeg(clip: any, videoMetadata: any, transcript: string) {
+  const processingStartTime = Date.now();
+  const ffmpegServiceUrl = Deno.env.get('FFMPEG_SERVICE_URL') || 'http://localhost:8081';
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+  const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+  
+  try {
+    console.log(`Processing clip ${clip.id} with FFmpeg service at ${ffmpegServiceUrl}`);
+    
+    // Step 1: Download YouTube video using yt-dlp
+    const downloadResponse = await fetch(`${ffmpegServiceUrl}/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: videoMetadata.download_url,
+        format: 'mp4[height<=720]', // 720p max for performance
+        output_template: `temp_${clip.job_id}_%(title)s.%(ext)s`
+      })
+    });
+
+    if (!downloadResponse.ok) {
+      throw new Error(`Video download failed: ${downloadResponse.statusText}`);
+    }
+
+    const downloadResult = await downloadResponse.json();
+    const sourceVideoPath = downloadResult.output_file;
+    console.log(`Downloaded video: ${sourceVideoPath}`);
+
+    // Step 2: Extract and process clip segment
+    const processResponse = await fetch(`${ffmpegServiceUrl}/process`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input_file: sourceVideoPath,
+        start_time: clip.start_time,
+        duration: clip.duration_seconds,
+        output_file: `clip_${clip.id}.mp4`,
+        operations: [
+          {
+            type: 'subtitle',
+            style: clip.jobs?.captions_style || 'modern',
+            text: generateCaptions(transcript, clip.start_time, clip.end_time),
+            font_size: 24,
+            font_color: '#FFFFFF',
+            background_color: '#000000AA'
+          },
+          ...(clip.jobs?.music_enabled ? [{
+            type: 'audio_overlay',
+            audio_file: 'assets/music/upbeat_track.mp3',
+            volume: 0.3,
+            start_offset: 0
+          }] : []),
+          ...(clip.jobs?.sfx_enabled ? [{
+            type: 'sound_effects',
+            effects: ['transition_whoosh'],
+            timing: [clip.duration_seconds * 0.1] // Add whoosh at 10% through clip
+          }] : [])
+        ]
+      })
+    });
+
+    if (!processResponse.ok) {
+      throw new Error(`Clip processing failed: ${processResponse.statusText}`);
+    }
+
+    const processResult = await processResponse.json();
+    console.log(`Processed clip: ${processResult.output_file}`);
+
+    // Step 3: Generate thumbnails
+    const thumbnailResponse = await fetch(`${ffmpegServiceUrl}/thumbnail`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input_file: processResult.output_file,
+        timestamps: ['00:00:01', '25%', '50%'], // 3 thumbnails at different points
+        output_pattern: `thumb_${clip.id}_%d.jpg`,
+        size: '640x360'
+      })
+    });
+
+    const thumbnailResult = await thumbnailResponse.json();
+    console.log(`Generated thumbnails: ${thumbnailResult.thumbnails?.length || 0}`);
+
+    // Step 4: Upload files to Supabase Storage
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    
+    // Upload main video file
+    const videoBuffer = await fetch(`${ffmpegServiceUrl}/download-file/${processResult.output_file}`).then(r => r.arrayBuffer());
+    const { data: videoUpload, error: videoError } = await supabase.storage
+      .from('processed-clips')
+      .upload(`${clip.job_id}/${clip.id}.mp4`, videoBuffer, {
+        contentType: 'video/mp4'
+      });
+
+    if (videoError) throw videoError;
+
+    // Upload thumbnails
+    const thumbnailUrls = [];
+    for (let i = 0; i < (thumbnailResult.thumbnails?.length || 0); i++) {
+      const thumbBuffer = await fetch(`${ffmpegServiceUrl}/download-file/${thumbnailResult.thumbnails[i]}`).then(r => r.arrayBuffer());
+      const { data: thumbUpload } = await supabase.storage
+        .from('thumbnails')
+        .upload(`${clip.job_id}/${clip.id}_thumb_${i + 1}.jpg`, thumbBuffer, {
+          contentType: 'image/jpeg'
+        });
+      
+      if (thumbUpload) {
+        thumbnailUrls.push(`${supabaseUrl}/storage/v1/object/public/thumbnails/${thumbUpload.path}`);
+      }
+    }
+
+    // Generate subtitle files
+    const subtitles = generateSubtitleFiles(transcript, clip.start_time, clip.end_time);
+    const subtitleUrls = [];
+    
+    for (const [format, content] of Object.entries(subtitles)) {
+      const { data: subUpload } = await supabase.storage
+        .from('subtitles')
+        .upload(`${clip.job_id}/${clip.id}.${format}`, content, {
+          contentType: format === 'vtt' ? 'text/vtt' : 'text/plain'
+        });
+      
+      if (subUpload) {
+        subtitleUrls.push(`${supabaseUrl}/storage/v1/object/public/subtitles/${subUpload.path}`);
+      }
+    }
+
+    // Cleanup temporary files on FFmpeg service
+    await fetch(`${ffmpegServiceUrl}/cleanup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        files: [sourceVideoPath, processResult.output_file, ...(thumbnailResult.thumbnails || [])]
+      })
+    }).catch(() => {/* Ignore cleanup errors */});
+
+    return {
+      video_url: `${supabaseUrl}/storage/v1/object/public/processed-clips/${videoUpload.path}`,
+      thumbnail_urls: thumbnailUrls,
+      subtitle_urls: subtitleUrls,
+      file_size_bytes: videoBuffer.byteLength,
+      checksum: `sha256:${await generateChecksum(new Uint8Array(videoBuffer))}`,
+      processing_time_ms: Date.now() - processingStartTime
+    };
+
+  } catch (error) {
+    console.error('FFmpeg processing error:', error);
+    throw new Error(`Video processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+function generateCaptions(transcript: string, startTime: number, endTime: number): string {
+  // Extract relevant portion of transcript for this clip
+  const words = transcript.split(' ');
+  const duration = endTime - startTime;
+  const totalDuration = 300; // Assume 5min average video for calculation
+  const wordsPerSecond = words.length / totalDuration;
+  const startWordIndex = Math.floor(startTime * wordsPerSecond);
+  const endWordIndex = Math.floor(endTime * wordsPerSecond);
+  
+  return words.slice(startWordIndex, endWordIndex).join(' ');
+}
+
+function generateSubtitleFiles(transcript: string, startTime: number, endTime: number): { vtt: string; srt: string } {
+  const captionText = generateCaptions(transcript, startTime, endTime);
+  const words = captionText.split(' ');
+  const duration = endTime - startTime;
+  
+  // Generate VTT format
+  let vttContent = 'WEBVTT\n\n';
+  let srtContent = '';
+  let index = 1;
+  
+  // Split into 3-4 second segments for readability
+  const segmentDuration = 3.5;
+  const wordsPerSegment = Math.ceil(words.length / (duration / segmentDuration));
+  
+  for (let i = 0; i < words.length; i += wordsPerSegment) {
+    const segmentWords = words.slice(i, i + wordsPerSegment);
+    const segmentStart = (i / words.length) * duration;
+    const segmentEnd = Math.min(((i + wordsPerSegment) / words.length) * duration, duration);
+    
+    const startTimeStr = formatTimestamp(segmentStart);
+    const endTimeStr = formatTimestamp(segmentEnd);
+    
+    // VTT format
+    vttContent += `${startTimeStr} --> ${endTimeStr}\n${segmentWords.join(' ')}\n\n`;
+    
+    // SRT format
+    srtContent += `${index}\n${startTimeStr.replace('.', ',')} --> ${endTimeStr.replace('.', ',')}\n${segmentWords.join(' ')}\n\n`;
+    index++;
+  }
+  
+  return { vtt: vttContent, srt: srtContent };
+}
+
+function formatTimestamp(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
+}
+
+async function generateChecksum(data: Uint8Array): Promise<string> {
+  const buffer = new ArrayBuffer(data.byteLength);
+  const view = new Uint8Array(buffer);
+  view.set(data);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }

@@ -213,7 +213,9 @@ Deno.serve(async (req) => {
           .single();
 
         return new Response(JSON.stringify({
-          error: '❌ Clip creation failed. Please check FFmpeg service',
+          error: responseText.includes('Invalid URL') ? '❌ Invalid YouTube URL' : 
+                 responseText.includes('API key') ? '⚠️ Missing or invalid API key' :
+                 '❌ Clip creation failed. Please try another video',
           jobId: failedJob?.id || null,
           status: 'failed'
         }), {
@@ -366,7 +368,7 @@ Deno.serve(async (req) => {
         .single();
 
       return new Response(JSON.stringify({
-        error: '❌ Clip creation failed. Please check FFmpeg service',
+        error: '❌ Clip creation failed. Please try another video',
         jobId: failedJob?.id || null,
         status: 'failed'
       }), {
@@ -378,7 +380,7 @@ Deno.serve(async (req) => {
   } catch (error) {
     console.error('Error in jobs-create:', error);
     return new Response(JSON.stringify({
-      error: '❌ Clip creation failed. Please check FFmpeg service'
+      error: '❌ Clip creation failed. Please try another video'
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }

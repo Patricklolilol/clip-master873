@@ -165,12 +165,24 @@ Deno.serve(async (req) => {
 
       // If ffmpeg returned a queued/processing shape
       if (ff.status === 200 && ff.body && (ff.body.status === "queued" || ff.body.status === "processing")) {
+        // Map stages consistently: Queued → Downloading → Transcribing → Detecting → Creating Clips → Uploading → Completed
+        let stage = 'Processing';
+        if (ff.body.status === 'queued') {
+          stage = 'Queued';
+        } else if (ff.body.progress) {
+          if (ff.body.progress < 20) stage = 'Downloading';
+          else if (ff.body.progress < 40) stage = 'Transcribing';
+          else if (ff.body.progress < 60) stage = 'Detecting';
+          else if (ff.body.progress < 80) stage = 'Creating Clips';
+          else stage = 'Uploading';
+        }
+        
         // Update DB with latest status/progress
         const { data: updatedJob, error: updateError } = await supabase
           .from('jobs')
           .update({
             status: 'processing',
-            stage: ff.body.status === 'queued' ? 'Queued' : 'Processing',
+            stage: stage,
             progress: ff.body.progress || jobRow.progress || 0
           })
           .eq('id', jobId)
@@ -191,13 +203,13 @@ Deno.serve(async (req) => {
 
       // Check if job has been queued too long (60 seconds)
       const jobAge = Date.now() - new Date(jobRow.created_at).getTime();
-      if (jobAge > 60000) {
+      if (jobAge > 60000 && jobRow.status === 'queued') {
         // Mark job as failed due to timeout
         const { data: failedJob, error: updateError } = await supabase
           .from('jobs')
           .update({
             status: 'failed',
-            stage: 'Failed',
+            stage: '❌ Video processing timed out. Please try another video',
             progress: 0
           })
           .eq('id', jobId)
@@ -208,6 +220,7 @@ Deno.serve(async (req) => {
           console.error('Failed to update job to failed:', updateError);
         }
 
+        console.log(`Job ${jobId} timed out after ${jobAge}ms`);
         return new Response(JSON.stringify(failedJob || jobRow), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });

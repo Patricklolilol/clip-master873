@@ -1,35 +1,127 @@
-import "https://deno.land/x/xhr@0.1.0/mod.ts";
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.57.4';
+// index.ts - jobs-create
+import fetch from "node-fetch";
+import { v4 as uuidv4 } from "uuid";
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
+/**
+ * This edge function expects:
+ * - environment FFMPEG_SERVICE_URL
+ * - optional FFMPEG_API_KEY
+ *
+ * Behavior:
+ * - Post to FFMPEG_SERVICE_URL/process
+ * - If ffmpeg returns sync success (code===0 && data) — create completed job and return clips
+ * - If ffmpeg returns async (202 OR returns job_id/jobId+status) — create queued job and return our jobId
+ */
 
-interface JobsCreateRequest {
-  videoUrl: string;
-  options: {
-    captions: string;
-    music: boolean;
-    sfx: boolean;
-  };
+const FFMPEG_URL = process.env.FFMPEG_SERVICE_URL;
+const FFMPEG_KEY = process.env.FFMPEG_API_KEY;
+
+if (!FFMPEG_URL) {
+  console.error("FFMPEG_SERVICE_URL not set");
 }
 
-// Helper function to make absolute URLs from FFmpeg response
-const makeAbsoluteUrl = (url: string, baseUrl: string): string => {
-  if (url.startsWith('http')) return url;
-  if (url.startsWith('/')) return `${baseUrl}${url}`;
-  return `${baseUrl}/${url}`;
-};
-
-serve(async (req) => {
-  // Handle CORS preflight requests
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+async function fetchWithRetries(url: string, opts: any, retries = 2) {
+  let attempt = 0;
+  let lastErr;
+  while (attempt <= retries) {
+    try {
+      const res = await fetch(url, opts);
+      return res;
+    } catch (err) {
+      lastErr = err;
+      // bump backoff
+      const delay = 200 * Math.pow(2, attempt);
+      await new Promise((r) => setTimeout(r, delay));
+      attempt++;
+    }
   }
+  throw lastErr;
+}
 
+export default async function handler(req: any, res: any) {
   try {
+    const body = await req.json();
+    console.log("jobs-create incoming body:", body);
+
+    // build outgoing payload
+    const payload = {
+      media_url: body.media_url,
+      options: body.options || {}
+    };
+
+    const headers: any = {"Content-Type":"application/json"};
+    if (FFMPEG_KEY) headers["x-api-key"] = FFMPEG_KEY;
+
+    console.log("Posting to FFmpeg service", FFMPEG_URL + "/process", payload);
+    const ffmpegResp = await fetchWithRetries(`${FFMPEG_URL}/process`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }, 2);
+
+    const status = ffmpegResp.status;
+    const text = await ffmpegResp.text();
+    let ffmpegData: any;
+    try { ffmpegData = JSON.parse(text); } catch (e) { ffmpegData = text; }
+
+    console.log("FFmpeg response status:", status);
+    console.log("FFmpeg response body:", ffmpegData);
+
+    // Synchronous success pattern (legacy): { code:0, data: {...} }
+    if (ffmpegResp.ok && typeof ffmpegData === "object" && ffmpegData.code === 0 && ffmpegData.data) {
+      // convert ffmpegData.data into clips array your DB expects (example)
+      const processedClips = [{
+        url: ffmpegData.data.conversion?.url,
+        screenshots: ffmpegData.data.screenshots || []
+      }];
+
+      // Persist job in DB as completed (you must adapt DB insertion here)
+      const jobId = uuidv4();
+      // TODO: insert job record with stage Completed, status completed, clips=processedClips
+
+      return res.json({
+        jobId,
+        status: "completed",
+        clips: processedClips
+      });
+    }
+
+    // Async pattern — accept both camelCase and snake_case for job id
+    const ffmpegJobId = (ffmpegData && (ffmpegData.jobId || ffmpegData.job_id)) || null;
+    const ffmpegStatus = (ffmpegData && (ffmpegData.status || ffmpegData.state)) || null;
+
+    if (status === 202 || (ffmpegJobId && ffmpegStatus)) {
+      // create internal job row with ffmpeg_job_id and 'queued'
+      const ourJobId = uuidv4();
+      console.log("Creating queued job:", { ourJobId, ffmpegJobId, ffmpegStatus });
+
+      // TODO: INSERT into DB:
+      // {
+      //   id: ourJobId,
+      //   ffmpeg_job_id: ffmpegJobId,
+      //   status: 'queued',
+      //   stage: 'Queued',
+      //   progress: 0,
+      //   payload: payload,
+      //   expires_at: Date.now() + 24*3600*1000
+      // }
+
+      return res.status(202).json({
+        jobId: ourJobId,
+        status: ffmpegStatus || "queued",
+        ffmpegJobId: ffmpegJobId
+      });
+    }
+
+    // Unexpected shape -> log details and return 502
+    console.error("Unexpected FFmpeg response shape:", { status, ffmpegData });
+    return res.status(502).json({ error: "Unexpected FFmpeg response format", ffmpegData, status });
+
+  } catch (err: any) {
+    console.error("jobs-create error:", err);
+    return new Response(JSON.stringify({ error: err.message || String(err) }), { status: 500 });
+  }
+}
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const youtubeApiKey = Deno.env.get('YOUTUBE_API_KEY');

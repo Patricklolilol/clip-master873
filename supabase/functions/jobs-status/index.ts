@@ -182,16 +182,49 @@ Deno.serve(async (req) => {
           let stage = 'Processing';
           if (actualStatus === 'queued') {
             stage = 'Queued';
-          } else if (responseData.stage) {
-            // Use explicit stage from FFmpeg if available
-            stage = responseData.stage;
-          } else if (actualProgress !== undefined) {
-            // Map progress to stages
-            if (actualProgress < 20) stage = 'Downloading';
-            else if (actualProgress < 40) stage = 'Transcribing';
-            else if (actualProgress < 60) stage = 'Detecting';
-            else if (actualProgress < 80) stage = 'Creating Clips';
-            else stage = 'Uploading';
+          } else {
+            // If FFmpeg reports processing but stage is 'queued', ignore it and derive from progress
+            if (responseData.stage === 'queued') {
+              console.warn(`FFmpeg reports status=processing but stage=queued for job ${jobId}; deriving stage from progress`);
+            }
+            if (responseData.stage && responseData.stage !== 'queued') {
+              // Use explicit stage from FFmpeg if available and meaningful
+              stage = responseData.stage;
+            } else if (actualProgress !== undefined) {
+              // Map progress to stages
+              if (actualProgress < 20) stage = 'Downloading';
+              else if (actualProgress < 40) stage = 'Transcribing';
+              else if (actualProgress < 60) stage = 'Detecting';
+              else if (actualProgress < 80) stage = 'Creating Clips';
+              else stage = 'Uploading';
+            }
+          }
+
+          // Generic stuck detection: if 0% for >60s, mark failed
+          const jobAge = Date.now() - new Date(jobRow.created_at).getTime();
+          if (jobAge > 60000 && (!actualProgress || actualProgress === 0)) {
+            console.warn(`Job ${jobId} stuck at 0% for ${jobAge}ms, marking as failed`);
+            const { data: failedJob, error: failUpdateError } = await supabase
+              .from('jobs')
+              .update({
+                status: 'failed',
+                stage: '❌ Video processing timed out. Please try another video',
+                progress: 0,
+              })
+              .eq('id', jobId)
+              .select()
+              .single();
+
+            if (failUpdateError) {
+              console.error('Failed to update stuck job to failed:', failUpdateError);
+              return new Response(JSON.stringify(jobRow), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+              });
+            }
+
+            return new Response(JSON.stringify(failedJob), {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
           }
           
           // Update DB with latest status/progress

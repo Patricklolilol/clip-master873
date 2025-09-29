@@ -108,97 +108,116 @@ Deno.serve(async (req) => {
       const ff = await callFfmpegInfo(jobRow.ffmpeg_job_id, ffmpegServiceUrl, ffmpegApiKey);
       console.log("FFmpeg /info returned:", ff);
 
-      // If ffmpeg returned code===0 with data -> completed
-      if (ff.status === 200 && ff.body && ff.body.code === 0 && ff.body.data) {
-        const data = ff.body.data;
-        const processedClips = [];
+      // Accept both 200 and 202 responses
+      if ((ff.status === 200 || ff.status === 202) && ff.body && ff.body.code === 0) {
+        // Read from body.data with fallback to top-level
+        const responseData = ff.body.data || ff.body;
+        const actualStatus = responseData.status || ff.body.status;
+        const actualProgress = responseData.progress || ff.body.progress || 0;
+        
+        console.log("Parsed response data:", { actualStatus, actualProgress, hasConversion: !!responseData.conversion, hasScreenshots: !!responseData.screenshots });
 
-        // Handle screenshots
-        if (data.screenshots && Array.isArray(data.screenshots)) {
-          data.screenshots.forEach((screenshot: any, index: number) => {
-            const absoluteUrl = makeAbsoluteUrl(screenshot.url || screenshot, ffmpegServiceUrl);
-            processedClips.push({
-              name: `Screenshot ${index + 1}`,
-              url: absoluteUrl,
-              type: 'screenshot',
-              timestamp: screenshot.timestamp || index * 10
+        // Check if this is final completion (has conversion url or screenshots)
+        const isFinalCompletion = responseData.conversion?.url || 
+                                 (responseData.screenshots && Array.isArray(responseData.screenshots) && responseData.screenshots.length > 0) ||
+                                 actualStatus === 'completed';
+
+        if (isFinalCompletion) {
+          const processedClips = [];
+
+          // Handle screenshots
+          if (responseData.screenshots && Array.isArray(responseData.screenshots)) {
+            responseData.screenshots.forEach((screenshot: any, index: number) => {
+              const absoluteUrl = makeAbsoluteUrl(screenshot.url || screenshot, ffmpegServiceUrl);
+              processedClips.push({
+                name: `Screenshot ${index + 1}`,
+                url: absoluteUrl,
+                type: 'screenshot',
+                timestamp: screenshot.timestamp || index * 10
+              });
             });
-          });
-        }
-        
-        // Handle converted video
-        if (data.conversion && data.conversion.url) {
-          const absoluteUrl = makeAbsoluteUrl(data.conversion.url, ffmpegServiceUrl);
-          processedClips.push({
-            name: 'Converted Video',
-            url: absoluteUrl,
-            type: 'video',
-            size: data.conversion.size || null
-          });
-        }
+          }
+          
+          // Handle converted video
+          if (responseData.conversion && responseData.conversion.url) {
+            const absoluteUrl = makeAbsoluteUrl(responseData.conversion.url, ffmpegServiceUrl);
+            processedClips.push({
+              name: 'Converted Video',
+              url: absoluteUrl,
+              type: 'video',
+              size: responseData.conversion.size || null
+            });
+          }
 
-        // Update DB to completed
-        const { data: updatedJob, error: updateError } = await supabase
-          .from('jobs')
-          .update({
-            status: 'completed',
-            stage: 'Completed',
-            progress: 100,
-            clips: processedClips
-          })
-          .eq('id', jobId)
-          .select()
-          .single();
+          // Update DB to completed
+          const { data: updatedJob, error: updateError } = await supabase
+            .from('jobs')
+            .update({
+              status: 'completed',
+              stage: 'Completed',
+              progress: 100,
+              clips: processedClips
+            })
+            .eq('id', jobId)
+            .select()
+            .single();
 
-        if (updateError) {
-          console.error('Failed to update job to completed:', updateError);
-          return new Response(JSON.stringify({ error: 'Failed to update job status' }), {
-            status: 500,
+          if (updateError) {
+            console.error('Failed to update job to completed:', updateError);
+            return new Response(JSON.stringify({ error: 'Failed to update job status' }), {
+              status: 500,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+          }
+
+          console.log(`Job ${jobId} completed with ${processedClips.length} clips`);
+          return new Response(JSON.stringify(updatedJob), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
 
-        return new Response(JSON.stringify(updatedJob), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      }
+        // If it's in progress (queued/processing status)
+        if (actualStatus === "queued" || actualStatus === "processing") {
+          // Map stages consistently based on progress or explicit stage
+          let stage = 'Processing';
+          if (actualStatus === 'queued') {
+            stage = 'Queued';
+          } else if (responseData.stage) {
+            // Use explicit stage from FFmpeg if available
+            stage = responseData.stage;
+          } else if (actualProgress !== undefined) {
+            // Map progress to stages
+            if (actualProgress < 20) stage = 'Downloading';
+            else if (actualProgress < 40) stage = 'Transcribing';
+            else if (actualProgress < 60) stage = 'Detecting';
+            else if (actualProgress < 80) stage = 'Creating Clips';
+            else stage = 'Uploading';
+          }
+          
+          // Update DB with latest status/progress
+          const { data: updatedJob, error: updateError } = await supabase
+            .from('jobs')
+            .update({
+              status: actualStatus === 'queued' ? 'queued' : 'processing',
+              stage: stage,
+              progress: actualProgress
+            })
+            .eq('id', jobId)
+            .select()
+            .single();
 
-      // If ffmpeg returned a queued/processing shape
-      if (ff.status === 200 && ff.body && (ff.body.status === "queued" || ff.body.status === "processing")) {
-        // Map stages consistently: Queued → Downloading → Transcribing → Detecting → Creating Clips → Uploading → Completed
-        let stage = 'Processing';
-        if (ff.body.status === 'queued') {
-          stage = 'Queued';
-        } else if (ff.body.progress) {
-          if (ff.body.progress < 20) stage = 'Downloading';
-          else if (ff.body.progress < 40) stage = 'Transcribing';
-          else if (ff.body.progress < 60) stage = 'Detecting';
-          else if (ff.body.progress < 80) stage = 'Creating Clips';
-          else stage = 'Uploading';
-        }
-        
-        // Update DB with latest status/progress
-        const { data: updatedJob, error: updateError } = await supabase
-          .from('jobs')
-          .update({
-            status: 'processing',
-            stage: stage,
-            progress: ff.body.progress || jobRow.progress || 0
-          })
-          .eq('id', jobId)
-          .select()
-          .single();
+          if (updateError) {
+            console.error('Failed to update job progress:', updateError);
+            return new Response(JSON.stringify(jobRow), {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+          }
 
-        if (updateError) {
-          console.error('Failed to update job progress:', updateError);
-          return new Response(JSON.stringify(jobRow), {
+          console.log(`Job ${jobId} in progress: ${stage} (${actualProgress}%)`);
+          return new Response(JSON.stringify(updatedJob), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
-
-        return new Response(JSON.stringify(updatedJob), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
       }
 
       // Check if job has been queued too long (60 seconds)
@@ -227,9 +246,16 @@ Deno.serve(async (req) => {
       }
 
       // Unexpected remote response: return error with debugging info
+      console.error("Unexpected FFmpeg response format:", JSON.stringify(ff, null, 2));
       return new Response(JSON.stringify({ 
         error: "Unexpected FFmpeg /info response", 
-        debug: ff,
+        debug: {
+          status: ff.status,
+          hasBody: !!ff.body,
+          hasCode: ff.body?.code !== undefined,
+          hasData: !!ff.body?.data,
+          actualResponse: ff.body
+        },
         job: jobRow 
       }), {
         status: 502,

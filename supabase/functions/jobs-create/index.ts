@@ -1,23 +1,24 @@
-// index.ts - jobs-create
-import fetch from "node-fetch";
-import { v4 as uuidv4 } from "uuid";
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-/**
- * This edge function expects:
- * - environment FFMPEG_SERVICE_URL
- * - optional FFMPEG_API_KEY
- *
- * Behavior:
- * - Post to FFMPEG_SERVICE_URL/process
- * - If ffmpeg returns sync success (code===0 && data) — create completed job and return clips
- * - If ffmpeg returns async (202 OR returns job_id/jobId+status) — create queued job and return our jobId
- */
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
 
-const FFMPEG_URL = process.env.FFMPEG_SERVICE_URL;
-const FFMPEG_KEY = process.env.FFMPEG_API_KEY;
+interface JobsCreateRequest {
+  videoUrl: string;
+  options?: {
+    captions?: string;
+    music?: boolean;
+    sfx?: boolean;
+  };
+}
 
-if (!FFMPEG_URL) {
-  console.error("FFMPEG_SERVICE_URL not set");
+function makeAbsoluteUrl(url: string, baseUrl: string): string {
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  return `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
 async function fetchWithRetries(url: string, opts: any, retries = 2) {
@@ -29,7 +30,6 @@ async function fetchWithRetries(url: string, opts: any, retries = 2) {
       return res;
     } catch (err) {
       lastErr = err;
-      // bump backoff
       const delay = 200 * Math.pow(2, attempt);
       await new Promise((r) => setTimeout(r, delay));
       attempt++;
@@ -38,90 +38,13 @@ async function fetchWithRetries(url: string, opts: any, retries = 2) {
   throw lastErr;
 }
 
-export default async function handler(req: any, res: any) {
-  try {
-    const body = await req.json();
-    console.log("jobs-create incoming body:", body);
-
-    // build outgoing payload
-    const payload = {
-      media_url: body.media_url,
-      options: body.options || {}
-    };
-
-    const headers: any = {"Content-Type":"application/json"};
-    if (FFMPEG_KEY) headers["x-api-key"] = FFMPEG_KEY;
-
-    console.log("Posting to FFmpeg service", FFMPEG_URL + "/process", payload);
-    const ffmpegResp = await fetchWithRetries(`${FFMPEG_URL}/process`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    }, 2);
-
-    const status = ffmpegResp.status;
-    const text = await ffmpegResp.text();
-    let ffmpegData: any;
-    try { ffmpegData = JSON.parse(text); } catch (e) { ffmpegData = text; }
-
-    console.log("FFmpeg response status:", status);
-    console.log("FFmpeg response body:", ffmpegData);
-
-    // Synchronous success pattern (legacy): { code:0, data: {...} }
-    if (ffmpegResp.ok && typeof ffmpegData === "object" && ffmpegData.code === 0 && ffmpegData.data) {
-      // convert ffmpegData.data into clips array your DB expects (example)
-      const processedClips = [{
-        url: ffmpegData.data.conversion?.url,
-        screenshots: ffmpegData.data.screenshots || []
-      }];
-
-      // Persist job in DB as completed (you must adapt DB insertion here)
-      const jobId = uuidv4();
-      // TODO: insert job record with stage Completed, status completed, clips=processedClips
-
-      return res.json({
-        jobId,
-        status: "completed",
-        clips: processedClips
-      });
-    }
-
-    // Async pattern — accept both camelCase and snake_case for job id
-    const ffmpegJobId = (ffmpegData && (ffmpegData.jobId || ffmpegData.job_id)) || null;
-    const ffmpegStatus = (ffmpegData && (ffmpegData.status || ffmpegData.state)) || null;
-
-    if (status === 202 || (ffmpegJobId && ffmpegStatus)) {
-      // create internal job row with ffmpeg_job_id and 'queued'
-      const ourJobId = uuidv4();
-      console.log("Creating queued job:", { ourJobId, ffmpegJobId, ffmpegStatus });
-
-      // TODO: INSERT into DB:
-      // {
-      //   id: ourJobId,
-      //   ffmpeg_job_id: ffmpegJobId,
-      //   status: 'queued',
-      //   stage: 'Queued',
-      //   progress: 0,
-      //   payload: payload,
-      //   expires_at: Date.now() + 24*3600*1000
-      // }
-
-      return res.status(202).json({
-        jobId: ourJobId,
-        status: ffmpegStatus || "queued",
-        ffmpegJobId: ffmpegJobId
-      });
-    }
-
-    // Unexpected shape -> log details and return 502
-    console.error("Unexpected FFmpeg response shape:", { status, ffmpegData });
-    return res.status(502).json({ error: "Unexpected FFmpeg response format", ffmpegData, status });
-
-  } catch (err: any) {
-    console.error("jobs-create error:", err);
-    return new Response(JSON.stringify({ error: err.message || String(err) }), { status: 500 });
+Deno.serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders });
   }
-}
+
+  try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const youtubeApiKey = Deno.env.get('YOUTUBE_API_KEY');
@@ -230,9 +153,9 @@ export default async function handler(req: any, res: any) {
       screenshot_count: 3,
       convert_format: "mp4",
       // Include user options if provided
-      ...(options.captions && { captions: options.captions }),
-      ...(options.music !== undefined && { music: options.music }),
-      ...(options.sfx !== undefined && { sfx: options.sfx })
+      ...(options?.captions && { captions: options.captions }),
+      ...(options?.music !== undefined && { music: options.music }),
+      ...(options?.sfx !== undefined && { sfx: options.sfx })
     };
 
     console.log('FFmpeg payload:', JSON.stringify(ffmpegPayload, null, 2));
@@ -249,11 +172,11 @@ export default async function handler(req: any, res: any) {
 
       console.log('Calling FFmpeg service at:', `${ffmpegServiceUrl}/process`);
       
-      const ffmpegResponse = await fetch(`${ffmpegServiceUrl}/process`, {
+      const ffmpegResponse = await fetchWithRetries(`${ffmpegServiceUrl}/process`, {
         method: 'POST',
         headers: ffmpegHeaders,
         body: JSON.stringify(ffmpegPayload)
-      });
+      }, 2);
 
       console.log('FFmpeg response status:', ffmpegResponse.status);
       const responseText = await ffmpegResponse.text();
@@ -355,7 +278,7 @@ export default async function handler(req: any, res: any) {
             metadata,
             options,
             clips: processedClips,
-            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours from now
+            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
           })
           .select()
           .single();
@@ -377,9 +300,12 @@ export default async function handler(req: any, res: any) {
         });
       }
       
-      // Handle async response (if FFmpeg returns jobId)
-      else if (ffmpegData.jobId && ffmpegData.status) {
-        console.log('Async job created:', ffmpegData.jobId);
+      // Handle async response - accept both jobId and job_id
+      const ffmpegJobId = ffmpegData.jobId || ffmpegData.job_id;
+      const ffmpegStatus = ffmpegData.status;
+      
+      if (ffmpegResponse.status === 202 || (ffmpegJobId && ffmpegStatus)) {
+        console.log('Async job created:', ffmpegJobId);
         
         const { data: asyncJob, error: jobError } = await supabase
           .from('jobs')
@@ -387,9 +313,9 @@ export default async function handler(req: any, res: any) {
             user_id: user.id,
             source_url: videoUrl,
             video_id: videoId,
-            ffmpeg_job_id: ffmpegData.jobId,
-            status: ffmpegData.status,
-            stage: 'Processing',
+            ffmpeg_job_id: ffmpegJobId,
+            status: ffmpegStatus || 'queued',
+            stage: 'Queued',
             progress: 0,
             metadata,
             options,
@@ -406,7 +332,7 @@ export default async function handler(req: any, res: any) {
 
         return new Response(JSON.stringify({
           jobId: asyncJob.id,
-          status: ffmpegData.status,
+          status: ffmpegStatus || 'queued',
           metadata
         }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }

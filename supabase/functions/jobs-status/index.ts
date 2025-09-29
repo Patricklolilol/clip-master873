@@ -200,15 +200,30 @@ Deno.serve(async (req) => {
             }
           }
 
-          // Generic stuck detection: if 0% for >60s, mark failed
+          // Improved stuck detection with relaxed timeouts
           const jobAge = Date.now() - new Date(jobRow.created_at).getTime();
-          if (jobAge > 60000 && (!actualProgress || actualProgress === 0)) {
-            console.warn(`Job ${jobId} stuck at 0% for ${jobAge}ms, marking as failed`);
+          console.log(`Job ${jobId} status check: jobAge=${jobAge}ms, actualStatus=${actualStatus}, actualProgress=${actualProgress}`);
+          
+          // Check for specific timeout conditions
+          let shouldFail = false;
+          let failureMessage = '';
+          
+          if (actualStatus === 'queued' && jobAge > 180000) { // 3 minutes
+            shouldFail = true;
+            failureMessage = '❌ Queued too long. Please try again later or another video.';
+            console.warn(`Job ${jobId} queued too long: ${jobAge}ms > 3 minutes`);
+          } else if (actualStatus === 'processing' && (!actualProgress || actualProgress === 0) && jobAge > 600000) { // 10 minutes
+            shouldFail = true;
+            failureMessage = '❌ Taking longer than expected to start. Please try another video.';
+            console.warn(`Job ${jobId} processing at 0% too long: ${jobAge}ms > 10 minutes`);
+          }
+          
+          if (shouldFail) {
             const { data: failedJob, error: failUpdateError } = await supabase
               .from('jobs')
               .update({
                 status: 'failed',
-                stage: '❌ Video processing timed out. Please try another video',
+                stage: failureMessage,
                 progress: 0,
               })
               .eq('id', jobId)
@@ -253,15 +268,17 @@ Deno.serve(async (req) => {
         }
       }
 
-      // Check if job has been queued too long (60 seconds)
+      // Check fallback timeout for jobs without FFmpeg response (also use relaxed timeouts)
       const jobAge = Date.now() - new Date(jobRow.created_at).getTime();
-      if (jobAge > 60000 && jobRow.status === 'queued') {
+      console.log(`Job ${jobId} fallback timeout check: jobAge=${jobAge}ms, status=${jobRow.status}`);
+      
+      if (jobAge > 180000 && jobRow.status === 'queued') { // 3 minutes for queued jobs
         // Mark job as failed due to timeout
         const { data: failedJob, error: updateError } = await supabase
           .from('jobs')
           .update({
             status: 'failed',
-            stage: '❌ Video processing timed out. Please try another video',
+            stage: '❌ Queued too long. Please try again later or another video.',
             progress: 0
           })
           .eq('id', jobId)
@@ -272,7 +289,7 @@ Deno.serve(async (req) => {
           console.error('Failed to update job to failed:', updateError);
         }
 
-        console.log(`Job ${jobId} timed out after ${jobAge}ms`);
+        console.log(`Job ${jobId} queued timeout after ${jobAge}ms`);
         return new Response(JSON.stringify(failedJob || jobRow), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });

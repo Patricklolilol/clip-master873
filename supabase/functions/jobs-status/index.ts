@@ -176,18 +176,20 @@ Deno.serve(async (req) => {
           });
         }
 
-        // If it's in progress (queued/processing status)
-        if (actualStatus === "queued" || actualStatus === "processing") {
-          // Map stages consistently based on progress or explicit stage
-          let stage = 'Processing';
-          if (actualStatus === 'queued') {
-            stage = 'Queued';
-          } else {
-            // If FFmpeg reports processing but stage is 'queued', ignore it and derive from progress
-            if (responseData.stage === 'queued') {
-              console.warn(`FFmpeg reports status=processing but stage=queued for job ${jobId}; deriving stage from progress`);
-            }
-            if (responseData.stage && responseData.stage !== 'queued') {
+          // If it's in progress (queued/processing status)
+          // Derive an effective status: if FFmpeg stage says 'queued', treat as queued
+          const effectiveStatus = (responseData.stage === 'queued') 
+            ? 'queued' 
+            : (actualStatus || jobRow.status);
+
+          if (effectiveStatus === "queued" || effectiveStatus === "processing") {
+            // Map stages consistently based on progress or explicit stage
+            let stage = 'Processing';
+
+            if (effectiveStatus === 'queued') {
+              // Respect queued stage explicitly when FFmpeg reports it
+              stage = 'Queued';
+            } else if (responseData.stage && responseData.stage !== 'queued') {
               // Use explicit stage from FFmpeg if available and meaningful
               stage = responseData.stage;
             } else if (actualProgress !== undefined) {
@@ -198,74 +200,73 @@ Deno.serve(async (req) => {
               else if (actualProgress < 80) stage = 'Creating Clips';
               else stage = 'Uploading';
             }
-          }
 
-          // Improved stuck detection with relaxed timeouts
-          const jobAge = Date.now() - new Date(jobRow.created_at).getTime();
-          console.log(`Job ${jobId} status check: jobAge=${jobAge}ms, actualStatus=${actualStatus}, actualProgress=${actualProgress}`);
-          
-          // Check for specific timeout conditions
-          let shouldFail = false;
-          let failureMessage = '';
-          
-          if (actualStatus === 'queued' && jobAge > 180000) { // 3 minutes
-            shouldFail = true;
-            failureMessage = '❌ Queued too long. Please try again later or another video.';
-            console.warn(`Job ${jobId} queued too long: ${jobAge}ms > 3 minutes`);
-          } else if (actualStatus === 'processing' && (!actualProgress || actualProgress === 0) && jobAge > 600000) { // 10 minutes
-            shouldFail = true;
-            failureMessage = '❌ Taking longer than expected to start. Please try another video.';
-            console.warn(`Job ${jobId} processing at 0% too long: ${jobAge}ms > 10 minutes`);
-          }
-          
-          if (shouldFail) {
-            const { data: failedJob, error: failUpdateError } = await supabase
+            // Improved stuck detection with relaxed timeouts
+            const jobAge = Date.now() - new Date(jobRow.created_at).getTime();
+            console.log(`Job ${jobId} status check: jobAge=${jobAge}ms, effectiveStatus=${effectiveStatus}, actualStatus=${actualStatus}, actualProgress=${actualProgress}, stage=${responseData.stage}`);
+            
+            // Check for specific timeout conditions using effectiveStatus
+            let shouldFail = false;
+            let failureMessage = '';
+            
+            if (effectiveStatus === 'queued' && jobAge > 180000) { // 3 minutes
+              shouldFail = true;
+              failureMessage = '❌ Queued too long. Please try again later or another video.';
+              console.warn(`Job ${jobId} queued too long: ${jobAge}ms > 3 minutes`);
+            } else if (effectiveStatus === 'processing' && (!actualProgress || actualProgress === 0) && jobAge > 600000) { // 10 minutes
+              shouldFail = true;
+              failureMessage = '❌ Taking longer than expected to start. Please try another video.';
+              console.warn(`Job ${jobId} processing at 0% too long: ${jobAge}ms > 10 minutes`);
+            }
+            
+            if (shouldFail) {
+              const { data: failedJob, error: failUpdateError } = await supabase
+                .from('jobs')
+                .update({
+                  status: 'failed',
+                  stage: failureMessage,
+                  progress: 0,
+                })
+                .eq('id', jobId)
+                .select()
+                .single();
+
+              if (failUpdateError) {
+                console.error('Failed to update stuck job to failed:', failUpdateError);
+                return new Response(JSON.stringify(jobRow), {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+              }
+
+              return new Response(JSON.stringify(failedJob), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+              });
+            }
+            
+            // Update DB with latest status/progress
+            const { data: updatedJob, error: updateError } = await supabase
               .from('jobs')
               .update({
-                status: 'failed',
-                stage: failureMessage,
-                progress: 0,
+                status: effectiveStatus === 'queued' ? 'queued' : 'processing',
+                stage: stage,
+                progress: actualProgress
               })
               .eq('id', jobId)
               .select()
               .single();
 
-            if (failUpdateError) {
-              console.error('Failed to update stuck job to failed:', failUpdateError);
+            if (updateError) {
+              console.error('Failed to update job progress:', updateError);
               return new Response(JSON.stringify(jobRow), {
                 headers: { ...corsHeaders, 'Content-Type': 'application/json' }
               });
             }
 
-            return new Response(JSON.stringify(failedJob), {
+            console.log(`Job ${jobId} in progress: ${stage} (${actualProgress}%)`);
+            return new Response(JSON.stringify(updatedJob), {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
             });
           }
-          
-          // Update DB with latest status/progress
-          const { data: updatedJob, error: updateError } = await supabase
-            .from('jobs')
-            .update({
-              status: actualStatus === 'queued' ? 'queued' : 'processing',
-              stage: stage,
-              progress: actualProgress
-            })
-            .eq('id', jobId)
-            .select()
-            .single();
-
-          if (updateError) {
-            console.error('Failed to update job progress:', updateError);
-            return new Response(JSON.stringify(jobRow), {
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-            });
-          }
-
-          console.log(`Job ${jobId} in progress: ${stage} (${actualProgress}%)`);
-          return new Response(JSON.stringify(updatedJob), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        }
       }
 
       // Check fallback timeout for jobs without FFmpeg response (also use relaxed timeouts)
